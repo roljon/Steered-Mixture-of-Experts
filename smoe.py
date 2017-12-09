@@ -149,28 +149,6 @@ class Smoe:
         self.session.run(init_new_vars_op)
 
     def set_optimizer(self, optimizer1, optimizer2=None, grad_clip_value_abs=None):
-        # optimizer = tf.train.GradientDescentOptimizer(0.00005)
-        # optimizer = tf.train.MomentumOptimizer(0.000001, 0.1)
-        # optimizer = tf.train.AdamOptimizer(0.00005, epsilon=0.01) #best 0.00005
-        # optimizer = tf.train.AdamOptimizer(0.00005, beta1=0.05, beta2=0.1, epsilon=0.1)
-        # optimizer = tf.train.AdamOptimizer(0.000001, beta1=0.1, beta2=0.9, epsilon=0.1)
-        # optimizer = tf.train.AdamOptimizer(0.00005)
-
-        """
-        var_list1 = [pis_var]
-        var_list2 = [musX_var,nu_e,gamma_e,U_var] #pis
-        #opt1 = tf.train.GradientDescentOptimizer(0.0000001) #tf.train.AdamOptimizer(0.000005, beta1=0.05, beta2=0.1, epsilon=1)
-        opt1 = tf.train.AdamOptimizer(0.000005, beta1=0.05, beta2=0.1, epsilon=0.1)
-        opt2 = tf.train.AdamOptimizer(0.00005, beta1=0.05, beta2=0.1, epsilon=0.1)
-        grads = tf.gradients(loss, var_list1 + var_list2)
-        grads1 = grads[:len(var_list1)]
-        grads2 = grads[len(var_list1):]
-        train_op1 = opt1.apply_gradients(zip(grads1, var_list1))
-        train_op2 = opt2.apply_gradients(zip(grads2, var_list2))
-        train = tf.group(train_op1, train_op2)
-        #"""
-        # """
-
         self.optimizer1 = optimizer1
         if optimizer2 is not None:
             self.optimizer2 = optimizer2
@@ -211,36 +189,6 @@ class Smoe:
 
         init_new_vars_op = tf.variables_initializer(uninitialized_vars)
         self.session.run(init_new_vars_op)
-
-        # print(self.session.run(tf.report_uninitialized_variables()))
-        # print([v for v in tf.global_variables() if v.name.split(':')[0]])
-        # print([v for v in tf.global_variables() if
-        #      v.name.split(':')[0] in set(self.session.run(tf.report_uninitialized_variables()))
-        #      ])
-        # self.session.run(tf.variables_initializer(tf.report_uninitialized_variables()))
-
-        # initialize optimizer vars, super hacky, probably does not work for all optimizers
-        """
-        if optimizer1 is not None:
-            optimizer_vars = [self.optimizer1.get_slot(self.loss_op, name) for name in self.optimizer1.get_slot_names()
-                              if self.optimizer1.get_slot(self.loss_op, name) is not None]
-            print(optimizer_vars)
-            try:
-                optimizer_vars += list(self.optimizer1._get_beta_accumulators())
-            except:
-                pass
-            print(optimizer_vars)
-            self.session.run(tf.initialize_variables(optimizer_vars))
-
-        if optimizer2 is not None:
-            optimizer_vars = [self.optimizer2.get_slot(self.loss_op, name) for name in self.optimizer2.get_slot_names()
-                              if self.optimizer2.get_slot(self.loss_op, name)]
-            try:
-                optimizer_vars += list(self.optimizer2._get_beta_accumulators())
-            except:
-                pass
-            self.session.run(tf.initialize_variables(optimizer_vars))
-        """
 
     def get_gradients(self):
         return self.session.run(self.gradients)

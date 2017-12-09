@@ -1,10 +1,13 @@
 # from sklearn.metrics import mean_squared_error
 # from skimage.measure import compare_ssim
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 import numpy as np
 import os
 import glob
+
+mpl.rcParams['image.cmap'] = 'jet'
 
 
 def psnr(mse):
