@@ -80,11 +80,23 @@ class Smoe:
     # TODO use self for init vars or refactor to a ModelParams class
     def init_model(self, domain_init, nu_e_init, gamma_e_init, pis_init, musX_init, U_init, train_pis=True,
                    sqrt_pis=False, pis_l1=None, pis_relu=False):
-        domain = tf.constant(domain_init, dtype=tf.float32)
-        domain_exp = tf.transpose(domain)
-        domain_exp = tf.tile(tf.expand_dims(domain_exp, axis=0), (musX_init.shape[1], 1, 1))
 
-        # self.pis_var = tf.Variable(pis_init, trainable=train_pis,dtype=tf.float32)
+        self.nu_e_var = tf.Variable(nu_e_init.T, dtype=tf.float32)
+        self.gamma_e_var = tf.Variable(gamma_e_init, dtype=tf.float32)
+        self.musX_var = tf.Variable(musX_init.T, dtype=tf.float32)
+        self.U_var = tf.Variable(U_init, tf.float32)
+        target = tf.constant(self.image, dtype=tf.float32)
+        domain = tf.constant(domain_init, dtype=tf.float32)
+
+        # prepare U
+        U_mask_init = np.ones_like(U_init)
+        U_mask_init[:, 0, 1] = 0
+
+        U_mask = tf.constant(U_mask_init, tf.float32)
+
+        U = self.U_var * U_mask
+        U = tf.maximum(10e-8, U)  # TODO Hotfix to prevent <= 0 values in diag(U) for log calculation for c
+
         if train_pis:
             self.pis_var = tf.Variable(pis_init, trainable=train_pis, dtype=tf.float32)
         else:
@@ -98,23 +110,11 @@ class Smoe:
         if sqrt_pis:
             pis **= 2
 
-        self.musX_var = tf.Variable(musX_init.T, dtype=tf.float32)
-        #musX = tf.transpose(self.musX_var)
-        #musX = tf.expand_dims(musX, axis=1)
         musX = tf.expand_dims(self.musX_var, axis=1)
 
-        U_mask_init = np.ones_like(U_init)
-        U_mask_init[:, 0, 1] = 0
-
-        U_mask = tf.constant(U_mask_init, tf.float32)
-        self.U_var = tf.Variable(U_init, tf.float32)
-        U = self.U_var * U_mask
-        U = tf.maximum(10e-8, U)  # TODO Hotfix to prevent <= 0 values in diag(U) for log calculation for c
-
-        self.nu_e_var = tf.Variable(nu_e_init.T, dtype=tf.float32)
-        self.gamma_e_var = tf.Variable(gamma_e_init, dtype=tf.float32)
-
-        target = tf.constant(self.image, dtype=tf.float32)
+        # prepare domain
+        domain_exp = tf.transpose(domain)
+        domain_exp = tf.tile(tf.expand_dims(domain_exp, axis=0), (tf.shape(musX)[1], 1, 1))
 
         X = domain_exp - musX
         Q = tf.linalg.triangular_solve(U, tf.transpose(X, perm=[0, 2, 1]))
