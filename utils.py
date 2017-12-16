@@ -1,5 +1,5 @@
 import pickle
-
+import numpy as np
 
 def reduce_params(params):
     idx = params['pis'] > 0
@@ -8,7 +8,7 @@ def reduce_params(params):
     params['U'] = params['U'][idx]
     params['nu_e'] = params['nu_e'][idx]
     params['gamma_e'] = params['gamma_e'][idx]
-    params['musX'] = params['musX'][:,idx]
+    params['musX'] = params['musX'][idx]
     return params
 
 
@@ -30,4 +30,5 @@ def save_model(smoe, path, best=False, reduce=True):
 def load_params(path):
     with open(path, 'rb') as fd:
         params = pickle.load(fd)['params']
+        params['musX'] = np.transpose(params['musX'])
     return params

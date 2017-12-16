@@ -1,9 +1,10 @@
 import numpy as np
 import tensorflow as tf
-
+from tensorflow.python.client import timeline
 
 class Smoe:
-    def __init__(self, image, kernels_per_dim=None, train_pis=True, sqrt_pis=False, pis_l1=None, pis_relu=False, init_params=None):
+    def __init__(self, image, kernels_per_dim=None, train_pis=True, sqrt_pis=False, pis_l1=None, pis_relu=False,
+                 init_params=None):
         self.domain = None
 
         # init params
@@ -34,6 +35,8 @@ class Smoe:
         self.checkpoint_best_op = None
         self.gradients = None
         self.mse_op = None
+
+        self.pis_l1 = None
 
         # optimizers
         self.optimizer1 = None
@@ -67,7 +70,10 @@ class Smoe:
             self.generate_experts()
             self.generate_pis(kernels_per_dim, sqrt_pis)
 
-        self.session = tf.Session()
+        gpu_options = tf.GPUOptions(allow_growth=True)
+        self.session = tf.InteractiveSession(config=tf.ConfigProto(gpu_options=gpu_options))
+
+        #self.session = tf.InteractiveSession()  # Session()
         self.init_model(self.domain, self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.U_init,
                         train_pis, sqrt_pis, pis_l1, pis_relu)
 
@@ -92,9 +98,10 @@ class Smoe:
         if sqrt_pis:
             pis **= 2
 
-        self.musX_var = tf.Variable(musX_init, dtype=tf.float32)
-        musX = tf.transpose(self.musX_var)
-        musX = tf.expand_dims(musX, axis=1)
+        self.musX_var = tf.Variable(musX_init.T, dtype=tf.float32)
+        #musX = tf.transpose(self.musX_var)
+        #musX = tf.expand_dims(musX, axis=1)
+        musX = tf.expand_dims(self.musX_var, axis=1)
 
         U_mask_init = np.ones_like(U_init)
         U_mask_init[:, 0, 1] = 0
@@ -119,7 +126,7 @@ class Smoe:
 
         w_e *= tf.transpose(pis)
         w_dewnom = tf.reduce_sum(w_e, axis=0)
-        self.w_e_op = (w_e * (1. / w_dewnom))
+        self.w_e_op = w_e / w_dewnom
 
         res = tf.reduce_sum((tf.matmul(self.gamma_e_var, domain) + self.nu_e_var) * self.w_e_op, axis=0)
         res = tf.reshape(res, self.image.shape)
@@ -139,7 +146,8 @@ class Smoe:
 
         mse = tf.reduce_sum(tf.square(self.restoration_op - target)) / tf.size(target, out_type=tf.float32)
         if pis_l1 is not None:
-            self.loss_op = mse + pis_l1 * tf.reduce_sum(pis)
+            self.pis_l1 = tf.placeholder(tf.float32)
+            self.loss_op = mse + self.pis_l1 * tf.reduce_sum(pis)
         else:
             self.loss_op = mse
 
@@ -175,6 +183,16 @@ class Smoe:
             gradients1 = self.gradients[:len(var_opt1)]
             gradients2 = self.gradients[len(var_opt1):]
 
+            # TODO work in progess
+            #for  grad in gradients1:
+            #    print (grad.shape)
+            pis_relu = tf.squeeze(tf.nn.relu(self.pis_var))
+            pis_norm = pis_relu / tf.reduce_sum(pis_relu)
+            pis_norm = tf.expand_dims(pis_norm, axis=1)
+            pis_norm = pis_norm * tf.cast(tf.count_nonzero(pis_norm), tf.float32)
+            pis_norm = tf.maximum(10e-8, pis_norm)
+            gradients1 = [grad / pis_norm if len(grad.shape) == 2 else grad / tf.expand_dims(pis_norm, axis=-1) for grad in gradients1]
+
             train_op1 = self.optimizer1.apply_gradients(zip(gradients1, var_opt1))
             train_op2 = self.optimizer2.apply_gradients(zip(gradients2, var_opt2))
             self.train_op = tf.group(train_op1, train_op2)
@@ -193,19 +211,33 @@ class Smoe:
     def get_gradients(self):
         return self.session.run(self.gradients)
 
-    def train(self, num_iter, val_iter=100, optimizer1=None, optimizer2=None, grad_clip_value_abs=None, callbacks=()):
+    def train(self, num_iter, val_iter=100, optimizer1=None, optimizer2=None, grad_clip_value_abs=None, pis_l1=0, callbacks=()):
         if optimizer1:
             self.set_optimizer(optimizer1, optimizer2, grad_clip_value_abs=grad_clip_value_abs)
         assert self.optimizer1 is not None, "no optimizer found, you have to specify one!"
 
+        #metadata = tf.RunMetadata()
+        #self.session.run(self.train_op, options=tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE,
+        #                                  output_partition_graphs=True),
+        #         run_metadata=metadata)
+
+        #timeline_ = timeline.Timeline(metadata.step_stats)
+        #with open("dynamic_stitch_gpu_profile.json", "w") as f:
+        #    f.write(timeline_.generate_chrome_trace_format())
+        #with open("dynamic_stitch_gpu_profile.pbtxt", "w") as f:
+        #    f.write(str(metadata))
+        #exit()
+
         self.losses = []
         self.mses = []
+        self.num_pis = []
         for i in range(num_iter):
+            # print(i)
             try:
-                loss_val, mse_val, _ = self.session.run([self.loss_op, self.mse_op, self.train_op])
+                loss_val, mse_val, _ = self.session.run([self.loss_op, self.mse_op, self.train_op], feed_dict={self.pis_l1: pis_l1})
 
                 # TODO take loss_history into account
-                if np.isnan(loss_val) or (len(self.losses) > 0 and loss_val > self.losses[0][1]*10):
+                if np.isnan(loss_val) or (len(self.losses) > 0 and loss_val > self.losses[0][1] * 10):
                     # self.session.run(
                     #     [self.loss_op, self.train_op, self.global_norm_op, self.global_norm1_op, self.global_norm2_op])
                     break

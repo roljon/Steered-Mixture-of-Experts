@@ -86,26 +86,27 @@ class ImagePlotter:
                 total = params['pis'].shape[1]
                 ax.set_title('{0:d} / {1:d} ({2:.2f})'.format(used, total, 100.*used/total))
 
+        iters_loss, losses = zip(*smoe.get_losses())
+        iters_mse, mses = zip(*smoe.get_mses())
+        assert iters_loss == iters_mse, "mse/loss logging out of sync"
+        self.fig.suptitle(
+            'start, best, last: {0:.6f} / {1:.6f} / {2:.6f}\n'
+            'MSE: start, best, last: {3:.2f} / {4:.2f} / {5:.2f}\n'
+            'PSNR: start, best, last: {6:.2f} / {7:.2f} / {8:.2f}'.format(losses[0],
+                                                                          smoe.get_best_loss(),
+                                                                          losses[-1],
+                                                                          mses[0],
+                                                                          smoe.get_best_mse(),
+                                                                          mses[-1],
+                                                                          psnr(mses[0]),
+                                                                          psnr(smoe.get_best_mse()),
+                                                                          psnr(mses[-1]))
+        )
+
         if not self.quiet:
             self.fig.canvas.draw()
 
         if self.path:
-            iters_loss, losses = zip(*smoe.get_losses())
-            iters_mse, mses = zip(*smoe.get_mses())
-            assert iters_loss == iters_mse, "mse/loss logging out of sync"
-            self.fig.suptitle(
-                'start, best, last: {0:.6f} / {1:.6f} / {2:.6f}\n'
-                'MSE: start, best, last: {3:.2f} / {4:.2f} / {5:.2f}\n'
-                'PSNR: start, best, last: {6:.2f} / {7:.2f} / {8:.2f}'.format(losses[0],
-                                                                              smoe.get_best_loss(),
-                                                                              losses[-1],
-                                                                              mses[0],
-                                                                              smoe.get_best_mse(),
-                                                                              mses[-1],
-                                                                              psnr(mses[0]),
-                                                                              psnr(smoe.get_best_mse()),
-                                                                              psnr(mses[-1]))
-            )
             name = str(iters_loss[-1]) + ".png"
             self.fig.savefig(self.path + "/" + name)
 
