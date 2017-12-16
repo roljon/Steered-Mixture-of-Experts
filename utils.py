@@ -4,7 +4,7 @@ import numpy as np
 def reduce_params(params):
     idx = params['pis'] > 0
     idx = idx[0]
-    params['pis'] = params['pis'][:,idx]
+    params['pis'] = params['pis'][idx]
     params['U'] = params['U'][idx]
     params['nu_e'] = params['nu_e'][idx]
     params['gamma_e'] = params['gamma_e'][idx]

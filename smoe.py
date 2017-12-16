@@ -81,10 +81,10 @@ class Smoe:
     def init_model(self, domain_init, nu_e_init, gamma_e_init, pis_init, musX_init, U_init, train_pis=True,
                    sqrt_pis=False, pis_l1=None, pis_relu=False):
 
-        self.nu_e_var = tf.Variable(nu_e_init.T, dtype=tf.float32)
+        self.nu_e_var = tf.Variable(nu_e_init, dtype=tf.float32)
         self.gamma_e_var = tf.Variable(gamma_e_init, dtype=tf.float32)
-        self.musX_var = tf.Variable(musX_init.T, dtype=tf.float32)
-        self.U_var = tf.Variable(U_init, tf.float32)
+        self.musX_var = tf.Variable(musX_init, dtype=tf.float32)
+        self.U_var = tf.Variable(U_init, dtype=tf.float32)
         target = tf.constant(self.image, dtype=tf.float32)
         domain = tf.constant(domain_init, dtype=tf.float32)
 
@@ -113,22 +113,22 @@ class Smoe:
         musX = tf.expand_dims(self.musX_var, axis=1)
 
         # prepare domain
-        domain_exp = tf.transpose(domain)
-        domain_exp = tf.tile(tf.expand_dims(domain_exp, axis=0), (tf.shape(musX)[1], 1, 1))
+        domain_exp = domain
+        domain_exp = tf.tile(tf.expand_dims(domain_exp, axis=0), (1, 1, 1))
 
         X = domain_exp - musX
         Q = tf.linalg.triangular_solve(U, tf.transpose(X, perm=[0, 2, 1]))
         q = tf.reduce_sum(Q * Q, axis=1)
-        d = domain_init.shape[0]
+        d = domain_init.shape[1]
         c = d * tf.log(2 * np.pi) + 2 * tf.reduce_sum(tf.log(tf.matrix_diag_part(U)), axis=1)
         y = -(tf.expand_dims(c, axis=1) + q) / 2
         w_e = tf.exp(y)
 
-        w_e *= tf.transpose(pis)
+        w_e *= tf.expand_dims(pis, axis=-1)
         w_dewnom = tf.reduce_sum(w_e, axis=0)
         self.w_e_op = w_e / w_dewnom
 
-        res = tf.reduce_sum((tf.matmul(self.gamma_e_var, domain) + self.nu_e_var) * self.w_e_op, axis=0)
+        res = tf.reduce_sum((tf.matmul(self.gamma_e_var, tf.transpose(domain)) + tf.expand_dims(self.nu_e_var, axis=-1)) * self.w_e_op, axis=0)
         res = tf.reshape(res, self.image.shape)
         self.restoration_op = tf.transpose(res)  # transpose only needed for compatibility and should be removed
 
@@ -186,12 +186,26 @@ class Smoe:
             # TODO work in progess
             #for  grad in gradients1:
             #    print (grad.shape)
-            pis_relu = tf.squeeze(tf.nn.relu(self.pis_var))
+            pis_relu = tf.nn.relu(self.pis_var)
             pis_norm = pis_relu / tf.reduce_sum(pis_relu)
-            pis_norm = tf.expand_dims(pis_norm, axis=1)
+            #pis_norm = tf.expand_dims(pis_norm, axis=1)
             pis_norm = pis_norm * tf.cast(tf.count_nonzero(pis_norm), tf.float32)
             pis_norm = tf.maximum(10e-8, pis_norm)
-            gradients1 = [grad / pis_norm if len(grad.shape) == 2 else grad / tf.expand_dims(pis_norm, axis=-1) for grad in gradients1]
+
+            pis_norm1 = tf.expand_dims(pis_norm, axis=-1)
+            pis_norm2 = tf.expand_dims(pis_norm1, axis=-1)
+            for grad in gradients1:
+                if len(grad.shape) == 1:
+                    grad /= pis_norm
+                elif len(grad.shape) == 2:
+                    grad /= pis_norm1
+                elif len(grad.shape) == 3:
+                    grad /= pis_norm2
+                else:
+                    raise ValueError
+
+            #gradients1 = [grad / pis_norm if len(grad.shape) == 2 else grad / tf.expand_dims(pis_norm, axis=-1) for grad
+            #              in gradients1]
 
             train_op1 = self.optimizer1.apply_gradients(zip(gradients1, var_opt1))
             train_op2 = self.optimizer2.apply_gradients(zip(gradients2, var_opt2))
@@ -328,7 +342,7 @@ class Smoe:
     # quadratic for 2d in [0,1]
     def generate_kernel_grid(self, kernels_per_dim):
         self.musX_init = self._gen_domain(kernels_per_dim)
-        RsXX = np.zeros((2, 2, kernels_per_dim ** 2))
+        RsXX = np.zeros((kernels_per_dim ** 2, 2, 2))
 
         for row in range(kernels_per_dim):
             for col in range(kernels_per_dim):
@@ -336,27 +350,28 @@ class Smoe:
                 sig_2 = 1 / (kernels_per_dim + 1) ** 2  # 1/((num_per_dim+1)**2)
                 roh = 0  # np.random.uniform(-0.1, 0.1)
 
-                RsXX[:, :, row * kernels_per_dim + col] = np.array([[sig_1, roh * sig_1 * sig_2],
+                RsXX[row * kernels_per_dim + col] = np.array([[sig_1, roh * sig_1 * sig_2],
                                                                     [roh * sig_1 * sig_2, sig_2]])
 
-        self.U_init = np.zeros(shape=np.roll(RsXX.shape, 1), dtype=np.float32)
+        #self.U_init = np.zeros(shape=np.roll(RsXX.shape, 1), dtype=np.float32)
+        self.U_init = np.zeros_like(RsXX)
         for k in range(self.U_init.shape[0]):
-            self.U_init[k] = np.linalg.cholesky(RsXX[:, :, k])
+            self.U_init[k] = np.linalg.cholesky(RsXX[k])
 
     def generate_experts(self, with_means=True):
         assert self.musX_init is not None, "need musX to generate experts"
         # random expert slopes
         # self.gamma_e_init = np.random.uniform(-0.1, 0.1, size=(self.musX_init.shape[1], 2))
 
-        self.gamma_e_init = np.zeros((self.musX_init.shape[1], 2))
+        self.gamma_e_init = np.zeros((self.musX_init.shape[0], 2))
 
         # choose nu_e to be 0.5 at center of kernel
         if with_means:
             # assumes that muX_init are in a square grid
             stride = self.musX_init[0, 0]
             height, width = self.image.shape
-            mean = np.empty((self.musX_init.shape[1],), dtype=np.float32)
-            for k, (x, y) in enumerate(zip(*self.musX_init)):
+            mean = np.empty((self.musX_init.shape[0],), dtype=np.float32)
+            for k, (x, y) in enumerate(zip(*self.musX_init.T)):
                 x0 = int(round((x - stride) * width))
                 x1 = int(round((x + stride) * width))
                 y0 = int(round((y - stride) * height))
@@ -365,8 +380,9 @@ class Smoe:
                 mean[k] = np.mean(self.image[y0:y1, x0:x1])
         else:
             mean = 0.5
-        self.nu_e_init = mean - np.sum(self.gamma_e_init * self.musX_init.T, axis=1)
-        self.nu_e_init = self.nu_e_init.reshape(1, self.musX_init.shape[1])
+        print(mean.shape, self.gamma_e_init.shape, self.musX_init.shape)
+        self.nu_e_init = mean - np.sum(self.gamma_e_init * self.musX_init, axis=1)
+        #self.nu_e_init = self.nu_e_init.reshape(1, self.musX_init.shape[1])
         # add a bit jitter
         # jitter = np.random.uniform(-0.05, 0.05, nu_e.shape)
         # print(nu_e)
@@ -376,7 +392,7 @@ class Smoe:
 
     def generate_pis(self, grid_size, sqrt_pis=False):
         number = grid_size ** 2
-        self.pis_init = np.ones((1, number), dtype=np.float32) / number
+        self.pis_init = np.ones((number,), dtype=np.float32) / number
         if sqrt_pis:
             self.pis_init = np.sqrt(self.pis_init)
             # jitter_range = 0.01
@@ -390,12 +406,12 @@ class Smoe:
             num_per_dim = in_.shape[0]
         else:
             num_per_dim = in_
-        domain = np.zeros((2, num_per_dim ** 2))
+        domain = np.zeros((num_per_dim ** 2, 2))
 
         for row in range(num_per_dim):
             for col in range(num_per_dim):
                 # equal spacing between domain positions and boarder
-                domain[0, row * num_per_dim + col] = (1 / num_per_dim) / 2 + row * (1 / num_per_dim)
-                domain[1, row * num_per_dim + col] = (1 / num_per_dim) / 2 + col * (1 / num_per_dim)
+                domain[row * num_per_dim + col, 0] = (1 / num_per_dim) / 2 + row * (1 / num_per_dim)
+                domain[row * num_per_dim + col, 1] = (1 / num_per_dim) / 2 + col * (1 / num_per_dim)
 
         return domain

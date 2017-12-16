@@ -81,9 +81,9 @@ class ImagePlotter:
                 ax.imshow(w_e_opt.argmax(axis=0).reshape((dim_size, dim_size)).T, interpolation='None')
             elif option == "pis_hist":
                 params = smoe.get_params()
-                ax.hist(params['pis'][0], 500)
-                used = np.count_nonzero(params['pis'][0] > 0)
-                total = params['pis'].shape[1]
+                ax.hist(params['pis'], 500)
+                used = np.count_nonzero(params['pis'] > 0)
+                total = params['pis'].shape[0]
                 ax.set_title('{0:d} / {1:d} ({2:.2f})'.format(used, total, 100.*used/total))
 
         iters_loss, losses = zip(*smoe.get_losses())
