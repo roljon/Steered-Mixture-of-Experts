@@ -25,8 +25,8 @@ def main(image_path, results_path, iterations, kernels_per_dim, params_file):
 
     #optimizer1 = tf.train.AdamOptimizer(0.005, beta1=0.05, beta2=0.1, epsilon=0.1)
     #optimizer2 = tf.train.GradientDescentOptimizer(0.0001)
-    optimizer1 = tf.train.AdamOptimizer(0.0001)
-    optimizer2 = tf.train.AdamOptimizer(0.000001)
+    optimizer1 = tf.train.AdamOptimizer(0.001)
+    optimizer2 = tf.train.AdamOptimizer(0.0001)
     # optimizer1 = tf.train.GradientDescentOptimizer(0.000001)
     # optimizer2 = tf.train.GradientDescentOptimizer(0.00000001)
 
