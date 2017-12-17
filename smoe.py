@@ -139,8 +139,8 @@ class Smoe:
         self.w_e_op = w_e / w_dewnom
 
         res = tf.reduce_sum((tf.matmul(gamma_e, tf.transpose(domain)) + tf.expand_dims(nu_e, axis=-1)) * self.w_e_op, axis=0)
-        res = tf.reshape(res, self.image.shape)
-        self.restoration_op = tf.transpose(res)  # transpose only needed for compatibility and should be removed
+
+        self.restoration_op = tf.reshape(res, self.image.shape)
 
         # checkpoint op
         self.pis_best_var = tf.Variable(self.pis_var)
@@ -380,7 +380,7 @@ class Smoe:
             stride = self.musX_init[0, 0]
             height, width = self.image.shape
             mean = np.empty((self.musX_init.shape[0],), dtype=np.float32)
-            for k, (x, y) in enumerate(zip(*self.musX_init.T)):
+            for k, (y, x) in enumerate(zip(*self.musX_init.T)):
                 x0 = int(round((x - stride) * width))
                 x1 = int(round((x + stride) * width))
                 y0 = int(round((y - stride) * height))
