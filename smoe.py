@@ -3,7 +3,7 @@ import tensorflow as tf
 from tensorflow.python.client import timeline
 
 class Smoe:
-    def __init__(self, image, kernels_per_dim=None, train_pis=True, sqrt_pis=False, pis_l1=None, pis_relu=False,
+    def __init__(self, image, kernels_per_dim=None, train_pis=True, sqrt_pis=False, pis_relu=False,
                  init_params=None):
         self.domain = None
 
@@ -75,11 +75,11 @@ class Smoe:
 
         #self.session = tf.InteractiveSession()  # Session()
         self.init_model(self.domain, self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.U_init,
-                        train_pis, sqrt_pis, pis_l1, pis_relu)
+                        train_pis, sqrt_pis, pis_relu)
 
     # TODO use self for init vars or refactor to a ModelParams class
     def init_model(self, domain_init, nu_e_init, gamma_e_init, pis_init, musX_init, U_init, train_pis=True,
-                   sqrt_pis=False, pis_l1=None, pis_relu=False):
+                   sqrt_pis=False, pis_relu=False):
 
         self.nu_e_var = tf.Variable(nu_e_init, dtype=tf.float32)
         self.gamma_e_var = tf.Variable(gamma_e_init, dtype=tf.float32)
@@ -112,6 +112,16 @@ class Smoe:
 
         musX = tf.expand_dims(self.musX_var, axis=1)
 
+        # filter out all vars for pi <= 0
+        # TODO this should be an option
+        pis_mask = pis > 0
+        musX = tf.boolean_mask(musX, pis_mask)
+        nu_e = tf.boolean_mask(self.nu_e_var, pis_mask)
+        gamma_e = tf.boolean_mask(self.gamma_e_var, pis_mask)
+        U = tf.boolean_mask(U, pis_mask)
+        pis = tf.boolean_mask(pis, pis_mask)
+
+
         # prepare domain
         domain_exp = domain
         domain_exp = tf.tile(tf.expand_dims(domain_exp, axis=0), (1, 1, 1))
@@ -128,7 +138,7 @@ class Smoe:
         w_dewnom = tf.reduce_sum(w_e, axis=0)
         self.w_e_op = w_e / w_dewnom
 
-        res = tf.reduce_sum((tf.matmul(self.gamma_e_var, tf.transpose(domain)) + tf.expand_dims(self.nu_e_var, axis=-1)) * self.w_e_op, axis=0)
+        res = tf.reduce_sum((tf.matmul(gamma_e, tf.transpose(domain)) + tf.expand_dims(nu_e, axis=-1)) * self.w_e_op, axis=0)
         res = tf.reshape(res, self.image.shape)
         self.restoration_op = tf.transpose(res)  # transpose only needed for compatibility and should be removed
 
@@ -145,11 +155,8 @@ class Smoe:
                                            tf.assign(self.nu_e_best_var, self.nu_e_var))
 
         mse = tf.reduce_sum(tf.square(self.restoration_op - target)) / tf.size(target, out_type=tf.float32)
-        if pis_l1 is not None:
-            self.pis_l1 = tf.placeholder(tf.float32)
-            self.loss_op = mse + self.pis_l1 * tf.reduce_sum(pis)
-        else:
-            self.loss_op = mse
+        self.pis_l1 = tf.placeholder(tf.float32)
+        self.loss_op = mse + self.pis_l1 * tf.reduce_sum(pis)
 
         self.mse_op = mse * (255**2)
 
@@ -184,6 +191,7 @@ class Smoe:
             gradients2 = self.gradients[len(var_opt1):]
 
             # TODO work in progess
+            #"""
             #for  grad in gradients1:
             #    print (grad.shape)
             pis_relu = tf.nn.relu(self.pis_var)
@@ -206,7 +214,7 @@ class Smoe:
 
             #gradients1 = [grad / pis_norm if len(grad.shape) == 2 else grad / tf.expand_dims(pis_norm, axis=-1) for grad
             #              in gradients1]
-
+            #"""
             train_op1 = self.optimizer1.apply_gradients(zip(gradients1, var_opt1))
             train_op2 = self.optimizer2.apply_gradients(zip(gradients2, var_opt2))
             self.train_op = tf.group(train_op1, train_op2)
@@ -248,7 +256,8 @@ class Smoe:
         for i in range(num_iter):
             # print(i)
             try:
-                loss_val, mse_val, _ = self.session.run([self.loss_op, self.mse_op, self.train_op], feed_dict={self.pis_l1: pis_l1})
+                loss_val, mse_val, _ = self.session.run([self.loss_op, self.mse_op, self.train_op],
+                                                        feed_dict={self.pis_l1: pis_l1})
 
                 # TODO take loss_history into account
                 if np.isnan(loss_val) or (len(self.losses) > 0 and loss_val > self.losses[0][1] * 10):
@@ -270,7 +279,7 @@ class Smoe:
                     self.mses.append((i, mse_val))
 
                     params = self.get_params()
-                    used = np.count_nonzero(params['pis'][0] > 0)
+                    used = np.count_nonzero(params['pis'] > 0)
                     self.num_pis.append((i, used))
 
                     # run callbacks

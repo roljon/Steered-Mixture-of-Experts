@@ -21,7 +21,7 @@ def main(image_path, results_path, iterations, kernels_per_dim, params_file):
     loss_plotter = LossPlotter(path=results_path + "/loss.png", quiet=True)
     image_plotter = ImagePlotter(path=results_path, options=['orig', 'reconstruction', 'gating', 'pis_hist'], quiet=True)
 
-    smoe = Smoe(orig, kernels_per_dim, init_params=init_params, pis_relu=True, train_pis=True, pis_l1=0.05)
+    smoe = Smoe(orig, kernels_per_dim, init_params=init_params, pis_relu=True, train_pis=True)
 
     #optimizer1 = tf.train.AdamOptimizer(0.005, beta1=0.05, beta2=0.1, epsilon=0.1)
     #optimizer2 = tf.train.GradientDescentOptimizer(0.0001)

@@ -8,7 +8,7 @@ from plotter import ImagePlotter, LossPlotter
 from utils import save_model, load_params
 
 
-def main(image_path, results_path, iterations, kernels_per_dim, params_file):
+def main(image_path, results_path, iterations, kernels_per_dim, params_file, l1reg, base_lr):
     orig = plt.imread(image_path)
     if orig.dtype == np.uint8:
         orig = orig.astype(np.float32)/255.
@@ -21,16 +21,16 @@ def main(image_path, results_path, iterations, kernels_per_dim, params_file):
     loss_plotter = LossPlotter(path=results_path + "/loss.png", quiet=True)
     image_plotter = ImagePlotter(path=results_path, options=['orig', 'reconstruction', 'gating', 'pis_hist'], quiet=True)
 
-    smoe = Smoe(orig, kernels_per_dim, init_params=init_params, pis_relu=True, train_pis=True, pis_l1=0.05)
+    smoe = Smoe(orig, kernels_per_dim, init_params=init_params, pis_relu=True, train_pis=True)
 
     #optimizer1 = tf.train.AdamOptimizer(0.005, beta1=0.05, beta2=0.1, epsilon=0.1)
     #optimizer2 = tf.train.GradientDescentOptimizer(0.0001)
-    optimizer1 = tf.train.AdamOptimizer(0.001)
-    optimizer2 = tf.train.AdamOptimizer(0.0001)
+    optimizer1 = tf.train.AdamOptimizer(base_lr)
+    optimizer2 = tf.train.AdamOptimizer(base_lr/100.)
     # optimizer1 = tf.train.GradientDescentOptimizer(0.000001)
     # optimizer2 = tf.train.GradientDescentOptimizer(0.00000001)
 
-    smoe.train(iterations, optimizer1=optimizer1, optimizer2=optimizer2,
+    smoe.train(iterations, optimizer1=optimizer1, optimizer2=optimizer2, pis_l1=l1reg,
                callbacks=[loss_plotter.plot, image_plotter.plot])
 
 
@@ -44,7 +44,9 @@ if __name__ == '__main__':
     parser.add_argument('-n', '--iterations', type=int, default=10000, help="number of iterations")
     parser.add_argument('-k', '--kernels', type=int, default=12, help="number of kernels per dimension")
     parser.add_argument('-p', '--params', type=str, default=None, help="parameter file for model initialization")
+    parser.add_argument('-reg', '--l1reg', type=float, default=0, help="l1 regularization for pis")
+    parser.add_argument('-lr', '--learningrate', type=float, default=0.001, help="base learning rate")
 
     args = parser.parse_args()
 
-    main(args.image, args.results, args.iterations, args.kernels, args.params)
+    main(args.image, args.results, args.iterations, args.kernels, args.params, args.l1reg, args.learningrate)
