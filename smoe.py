@@ -1,10 +1,12 @@
 import numpy as np
+import math
 import tensorflow as tf
 from tensorflow.python.client import timeline
 
+
 class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, sqrt_pis=False, pis_relu=False,
-                 init_params=None):
+                 init_params=None, start_batches=1):
         self.domain = None
 
         # init params
@@ -35,8 +37,14 @@ class Smoe:
         self.checkpoint_best_op = None
         self.gradients = None
         self.mse_op = None
-
+        self.target_op = None
+        self.domain_op = None
         self.pis_l1 = None
+        self.zero_op = None
+        self.accum_ops = None
+        self.start = None
+        self.end = None
+        self.num_pi_op = None
 
         # optimizers
         self.optimizer1 = None
@@ -52,9 +60,18 @@ class Smoe:
         self.best_mse = []
         self.num_pis = []
 
+        self.iter = 0
+        self.valid = False
+        self.reconstruction_image = None
+        self.weight_matrix = None
+
         # generate initializations
         self.image = image
+        self.image_flat = image.flatten()
         self.init_domain()
+        self.intervals = self.calc_intervals(self.image_flat.size, start_batches)
+        self.batches = start_batches
+        self.start_batches = start_batches
 
         assert kernels_per_dim is not None or init_params is not None, \
             "You need to specify the kernel grid size or give initial parameters."
@@ -70,10 +87,12 @@ class Smoe:
             self.generate_experts()
             self.generate_pis(kernels_per_dim, sqrt_pis)
 
+        self.start_pis = self.pis_init.size
+
         gpu_options = tf.GPUOptions(allow_growth=True)
         self.session = tf.InteractiveSession(config=tf.ConfigProto(gpu_options=gpu_options))
+        #self.session = tf.Session()
 
-        #self.session = tf.InteractiveSession()  # Session()
         self.init_model(self.domain, self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.U_init,
                         train_pis, sqrt_pis, pis_relu)
 
@@ -85,8 +104,17 @@ class Smoe:
         self.gamma_e_var = tf.Variable(gamma_e_init, dtype=tf.float32)
         self.musX_var = tf.Variable(musX_init, dtype=tf.float32)
         self.U_var = tf.Variable(U_init, dtype=tf.float32)
-        target = tf.constant(self.image, dtype=tf.float32)
-        domain = tf.constant(domain_init, dtype=tf.float32)
+
+        # self.target_op = tf.placeholder(shape=[None], dtype=tf.float32)
+        # self.domain_op = tf.placeholder(shape=[None, 2], dtype=tf.float32)
+
+        self.target_op = tf.constant(self.image_flat, dtype=tf.float32)
+        self.domain_op = tf.constant(domain_init, dtype=tf.float32)
+
+        self.start = tf.placeholder(dtype=tf.int32)
+        self.end = tf.placeholder(dtype=tf.int32)
+        self.target_op = self.target_op[self.start:self.end]
+        self.domain_op = self.domain_op[self.start:self.end]
 
         # prepare U
         U_mask_init = np.ones_like(U_init)
@@ -112,22 +140,38 @@ class Smoe:
 
         musX = tf.expand_dims(self.musX_var, axis=1)
 
+        pis_mask = pis > 0
         # filter out all vars for pi <= 0
         # TODO this should be an option
-        pis_mask = pis > 0
+        #"""
         musX = tf.boolean_mask(musX, pis_mask)
         nu_e = tf.boolean_mask(self.nu_e_var, pis_mask)
         gamma_e = tf.boolean_mask(self.gamma_e_var, pis_mask)
         U = tf.boolean_mask(U, pis_mask)
         pis = tf.boolean_mask(pis, pis_mask)
-
+        """
+        nu_e = self.nu_e_var
+        gamma_e = self.gamma_e_var
+        #"""
 
         # prepare domain
-        domain_exp = domain
+        domain_exp = self.domain_op
         domain_exp = tf.tile(tf.expand_dims(domain_exp, axis=0), (1, 1, 1))
 
         X = domain_exp - musX
         Q = tf.linalg.triangular_solve(U, tf.transpose(X, perm=[0, 2, 1]))
+        """
+        transp = tf.transpose(X, perm=[0, 2, 1])
+        u1 = U[:32768]
+        u2 = U[32768:]
+        x1 = transp[:32768]
+        x2 = transp[32768:]
+        with tf.device("/cpu:0"):
+            Q1 = tf.linalg.triangular_solve(u1, x1,name="kjgvjsvb")
+            Q2 = tf.linalg.triangular_solve(u2, x2)
+            Q = tf.concat([Q1, Q2], axis=0)
+        #"""
+
         q = tf.reduce_sum(Q * Q, axis=1)
         d = domain_init.shape[1]
         c = d * tf.log(2 * np.pi) + 2 * tf.reduce_sum(tf.log(tf.matrix_diag_part(U)), axis=1)
@@ -138,9 +182,9 @@ class Smoe:
         w_dewnom = tf.reduce_sum(w_e, axis=0)
         self.w_e_op = w_e / w_dewnom
 
-        res = tf.reduce_sum((tf.matmul(gamma_e, tf.transpose(domain)) + tf.expand_dims(nu_e, axis=-1)) * self.w_e_op, axis=0)
+        self.res = tf.reduce_sum((tf.matmul(gamma_e, tf.transpose(self.domain_op)) + tf.expand_dims(nu_e, axis=-1))
+                                 * self.w_e_op, axis=0)
 
-        self.restoration_op = tf.reshape(res, self.image.shape)
 
         # checkpoint op
         self.pis_best_var = tf.Variable(self.pis_var)
@@ -154,9 +198,13 @@ class Smoe:
                                            tf.assign(self.gamma_e_best_var, self.gamma_e_var),
                                            tf.assign(self.nu_e_best_var, self.nu_e_var))
 
-        mse = tf.reduce_sum(tf.square(self.restoration_op - target)) / tf.size(target, out_type=tf.float32)
+        #mse = tf.reduce_sum(tf.square(self.restoration_op - target)) / tf.size(target, out_type=tf.float32)
+        mse = tf.reduce_sum(tf.square(self.res - self.target_op)) / tf.cast(tf.size(self.target_op), dtype=tf.float32)
+
+        self.num_pi_op = tf.shape(pis)[0]
+
         self.pis_l1 = tf.placeholder(tf.float32)
-        self.loss_op = mse + self.pis_l1 * tf.reduce_sum(pis)
+        self.loss_op = mse + self.pis_l1 * tf.reduce_sum(pis) #/ tf.cast(self.num_pi_op, dtype=tf.float32)
 
         self.mse_op = mse * (255**2)
 
@@ -175,7 +223,11 @@ class Smoe:
         var_opt1 = [var for var in var_opt1 if var in tf.trainable_variables()]
         var_opt2 = [var for var in var_opt2 if var in tf.trainable_variables()]
 
+        accum_gradients = [tf.Variable(tf.zeros_like(var.initialized_value()), trainable=False)
+                           for var in var_opt1 + var_opt2]
+        self.zero_op = [grad.assign(tf.zeros_like(grad)) for grad in accum_gradients]
         self.gradients = tf.gradients(self.loss_op, var_opt1 + var_opt2)
+        self.accum_ops = [accum_gradients[i].assign_add(gv) for i, gv in enumerate(self.gradients)]
 
         if grad_clip_value_abs is not None:
             # gradients, _ = tf.clip_by_global_norm(gradients, 1)
@@ -185,10 +237,31 @@ class Smoe:
             # self.gradients = [tf.clip_by_norm(g, grad_clip_value_abs) for g in self.gradients]
 
         if self.optimizer2 is None or len(var_opt2) == 0:
-            self.train_op = self.optimizer1.apply_gradients(zip(self.gradients, var_opt1 + var_opt2))
+            #self.train_op = self.optimizer1.apply_gradients(zip(self.gradients, var_opt1 + var_opt2))
+            self.train_op = self.optimizer1.apply_gradients(zip(accum_gradients, var_opt1 + var_opt2))
+
         else:
-            gradients1 = self.gradients[:len(var_opt1)]
-            gradients2 = self.gradients[len(var_opt1):]
+            # gradients1 = self.gradients[:len(var_opt1)]
+            # gradients2 = self.gradients[len(var_opt1):]
+            gradients1 = accum_gradients[:len(var_opt1)]
+            gradients2 = accum_gradients[len(var_opt1):]
+
+            """
+            accum_gradients1 = [tf.Variable(tf.zeros_like(var.initialized_value()), trainable=False)
+                               for var in var_opt1]
+            zero_op1 = [grad.assign(tf.zeros_like(grad)) for grad in accum_gradients1]
+            gradients1 = self.optimizer1.compute_gradients(self.loss_op, var_opt1)
+            accum_ops1 = [accum_gradients1[i].assign_add(gv[0]) for i, gv in enumerate(gradients1)]
+
+            accum_gradients2 = [tf.Variable(tf.zeros_like(var.initialized_value()), trainable=False)
+                                for var in var_opt2]
+            zero_op2 = [grad.assign(tf.zeros_like(grad)) for grad in accum_gradients2]
+            gradients2 = self.optimizer1.compute_gradients(self.loss_op, var_opt2)
+            accum_ops2 = [accum_gradients2[i].assign_add(gv[0]) for i, gv in enumerate(gradients2)]
+
+            self.zero_op = tf.group(*(zero_op1+zero_op2))
+            self.accum_ops = tf.group(*(accum_ops1+accum_ops2))
+            #"""
 
             # TODO work in progess
             #"""
@@ -238,26 +311,46 @@ class Smoe:
             self.set_optimizer(optimizer1, optimizer2, grad_clip_value_abs=grad_clip_value_abs)
         assert self.optimizer1 is not None, "no optimizer found, you have to specify one!"
 
-        #metadata = tf.RunMetadata()
-        #self.session.run(self.train_op, options=tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE,
-        #                                  output_partition_graphs=True),
-        #         run_metadata=metadata)
+        """
+        metadata = tf.RunMetadata()
+        self.session.run(self.accum_ops, feed_dict={self.start: self.intervals[0][0],
+                                                               self.end: self.intervals[0][1],
+                                                               self.pis_l1: pis_l1 / self.batches},
+                         options=tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE,
+                         output_partition_graphs=True),
+                         run_metadata=metadata)
 
-        #timeline_ = timeline.Timeline(metadata.step_stats)
-        #with open("dynamic_stitch_gpu_profile.json", "w") as f:
-        #    f.write(timeline_.generate_chrome_trace_format())
-        #with open("dynamic_stitch_gpu_profile.pbtxt", "w") as f:
-        #    f.write(str(metadata))
-        #exit()
+        timeline_ = timeline.Timeline(metadata.step_stats)
+        with open("dynamic_stitch_gpu_profile.json", "w") as f:
+            f.write(timeline_.generate_chrome_trace_format())
+        with open("dynamic_stitch_gpu_profile.pbtxt", "w") as f:
+            f.write(str(metadata))
+        exit()
+        # """
 
         self.losses = []
         self.mses = []
         self.num_pis = []
-        for i in range(num_iter):
-            # print(i)
+
+        self.best_loss, self.best_mse, num_pi = self.run_batched(pis_l1=pis_l1, train=False, update_reconstruction=True)
+        self.losses.append((0, self.best_loss))
+        self.mses.append((0, self.best_mse))
+        self.num_pis.append((0, num_pi))
+
+        # run callbacks
+        for callback in callbacks:
+            callback(self)
+
+        for i in range(1, num_iter+1):
+            self.iter = i
             try:
-                loss_val, mse_val, _ = self.session.run([self.loss_op, self.mse_op, self.train_op],
-                                                        feed_dict={self.pis_l1: pis_l1})
+                validate = i % val_iter == 0
+
+                self.batches = math.ceil(self.start_batches * (num_pi/self.start_pis))
+                #print("{0} -> {1} batches".format(self.start_batches, self.batches))
+                self.intervals = self.calc_intervals(self.image_flat.size, self.batches)
+
+                loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, train=True, update_reconstruction=validate)
 
                 # TODO take loss_history into account
                 if np.isnan(loss_val) or (len(self.losses) > 0 and loss_val > self.losses[0][1] * 10):
@@ -265,7 +358,7 @@ class Smoe:
                     #     [self.loss_op, self.train_op, self.global_norm_op, self.global_norm1_op, self.global_norm2_op])
                     break
 
-                if i % val_iter == 0:
+                if validate:
                     # TODO take loss_history into account
                     if not self.best_loss or loss_val < self.best_loss:
                         self.best_loss = loss_val
@@ -278,9 +371,7 @@ class Smoe:
                         self.best_mse = mse_val
                     self.mses.append((i, mse_val))
 
-                    params = self.get_params()
-                    used = np.count_nonzero(params['pis'] > 0)
-                    self.num_pis.append((i, used))
+                    self.num_pis.append((i, num_pi))
 
                     # run callbacks
                     for callback in callbacks:
@@ -295,6 +386,61 @@ class Smoe:
         print("end loss/mse: ", loss_val, "/", mse_val,  "@iter: ", i)
         print("best loss/mse: ", self.best_loss, "/", self.best_mse)
 
+    def run_batched(self, pis_l1=0, train=True, update_reconstruction=False):
+        self.valid = False
+
+        self.session.run(self.zero_op)
+
+        loss_val = 0
+        mse_val = 0
+        num_pi = -1
+        # only for update update_reconstruction=True
+        reconstructions = []
+        w_es = []
+        for start, end in self.intervals:
+            retrieve = [self.loss_op, self.mse_op, self.num_pi_op, self.accum_ops]
+            if update_reconstruction:
+                #retrieve += [self.res, self.w_e_op]
+                retrieve += [self.res]
+
+            # builder = tf.profiler.ProfileOptionBuilder
+            # opts = builder(builder.time_and_memory()).order_by('micros').build()
+            # with tf.contrib.tfprof.ProfileContext('profile',
+            #                                      trace_steps=[],
+            #                                      dump_steps=[]) as pctx:
+            #    # Enable tracing for next session.run.
+            #    pctx.trace_next_step()
+            #    # Dump the profile to '/tmp/train_dir' after the step.
+            #    pctx.dump_next_step()
+
+            results = self.session.run(retrieve,
+                                            feed_dict={self.start: start,
+                                                       self.end: end,
+                                                       self.pis_l1: pis_l1})  # / self.batches
+
+            #    pctx.profiler.profile_operations(options=opts)
+            #    exit()
+
+            if update_reconstruction:
+                reconstructions.append(results[4])
+                #w_es.append(results[5])
+
+            loss_val += results[0] * (end - start) / self.image_flat.size
+            mse_val += results[1] * (end - start) / self.image_flat.size
+            num_pi = results[2]
+
+        if update_reconstruction:
+            reconstruction = np.concatenate(reconstructions)
+            self.reconstruction_image = reconstruction.reshape(self.image.shape)
+            #self.weight_matrix = np.concatenate(w_es, axis=1)
+            self.valid = True
+
+
+        if train:
+            self.session.run(self.train_op)
+
+        return loss_val, mse_val, num_pi
+
     def get_params(self):
         pis, musX, U, gamma_e, nu_e = self.session.run([self.pis_var, self.musX_var, self.U_var,
                                                         self.gamma_e_var, self.nu_e_var])
@@ -303,10 +449,17 @@ class Smoe:
         return out_dict
 
     def get_reconstruction(self):
-        return self.session.run(self.restoration_op)
+        if not self.valid:
+            self.run_batched(train=False, update_reconstruction=True)
+        return self.reconstruction_image
 
     def get_weight_matrix(self):
-        return self.session.run(self.w_e_op)
+        print("currently commented out in run_batched")
+        raise NotImplementedError
+
+        # if not self.valid:
+        #     self.run_batched(train=False, update_reconstruction=True)
+        # return self.weight_matrix
 
     def get_best_params(self):
         pis, musX, U, gamma_e, nu_e = self.session.run([self.pis_best_var, self.musX_best_var, self.U_best_var,
@@ -347,6 +500,9 @@ class Smoe:
 
     def init_domain(self):
         self.domain = self._gen_domain(self.image)
+
+    def get_iter(self):
+        return self.iter
 
     # quadratic for 2d in [0,1]
     def generate_kernel_grid(self, kernels_per_dim):
@@ -424,3 +580,15 @@ class Smoe:
                 domain[row * num_per_dim + col, 1] = (1 / num_per_dim) / 2 + col * (1 / num_per_dim)
 
         return domain
+
+    @staticmethod
+    def calc_intervals(in_size, batches):
+        start = 0
+        steps = np.linspace(0, in_size, num=max(2, batches), endpoint=True)
+        intervals = []
+        for end in steps[1:]:
+            end = int(end)
+            intervals.append((start, end))
+            start = end
+
+        return intervals
