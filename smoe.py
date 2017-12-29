@@ -40,6 +40,7 @@ class Smoe:
         self.target_op = None
         self.domain_op = None
         self.pis_l1 = None
+        self.u_l1 = None
         self.zero_op = None
         self.accum_ops = None
         self.start = None
@@ -81,7 +82,7 @@ class Smoe:
             self.musX_init = init_params['musX']
             self.U_init = init_params['U']
             self.gamma_e_init = init_params['gamma_e']
-            self.nu_e_init = init_params['nu_e'].T
+            self.nu_e_init = init_params['nu_e']
         else:
             self.generate_kernel_grid(kernels_per_dim)
             self.generate_experts()
@@ -204,7 +205,9 @@ class Smoe:
         self.num_pi_op = tf.shape(pis)[0]
 
         self.pis_l1 = tf.placeholder(tf.float32)
+        self.u_l1 = tf.placeholder(tf.float32)
         self.loss_op = mse + self.pis_l1 * tf.reduce_sum(pis) #/ tf.cast(self.num_pi_op, dtype=tf.float32)
+        self.loss_op = mse + self.u_l1 * tf.reduce_sum(U) # / tf.cast(self.num_pi_op, dtype=tf.float32)
 
         self.mse_op = mse * (255**2)
 
@@ -292,6 +295,14 @@ class Smoe:
             train_op2 = self.optimizer2.apply_gradients(zip(gradients2, var_opt2))
             self.train_op = tf.group(train_op1, train_op2)
 
+            with tf.control_dependencies([self.train_op]):
+                pis_mask = self.pis_var > 0
+                pis = tf.where(pis_mask, self.pis_var, tf.zeros_like(self.pis_var))
+                pis /= tf.reduce_sum(pis)
+                assign_op = self.pis_var.assign(pis)
+
+            self.train_op = tf.group(assign_op, train_op2)
+
         uninitialized_vars = []
         for var in tf.global_variables():
             try:
@@ -306,7 +317,7 @@ class Smoe:
     def get_gradients(self):
         return self.session.run(self.gradients)
 
-    def train(self, num_iter, val_iter=100, optimizer1=None, optimizer2=None, grad_clip_value_abs=None, pis_l1=0, callbacks=()):
+    def train(self, num_iter, val_iter=100, optimizer1=None, optimizer2=None, grad_clip_value_abs=None, pis_l1=0, u_l1=0, callbacks=()):
         if optimizer1:
             self.set_optimizer(optimizer1, optimizer2, grad_clip_value_abs=grad_clip_value_abs)
         assert self.optimizer1 is not None, "no optimizer found, you have to specify one!"
@@ -332,7 +343,7 @@ class Smoe:
         self.mses = []
         self.num_pis = []
 
-        self.best_loss, self.best_mse, num_pi = self.run_batched(pis_l1=pis_l1, train=False, update_reconstruction=True)
+        self.best_loss, self.best_mse, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=False, update_reconstruction=True)
         self.losses.append((0, self.best_loss))
         self.mses.append((0, self.best_mse))
         self.num_pis.append((0, num_pi))
@@ -350,12 +361,13 @@ class Smoe:
                 #print("{0} -> {1} batches".format(self.start_batches, self.batches))
                 self.intervals = self.calc_intervals(self.image_flat.size, self.batches)
 
-                loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, train=True, update_reconstruction=validate)
+                loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=True, update_reconstruction=validate)
 
                 # TODO take loss_history into account
-                if np.isnan(loss_val) or (len(self.losses) > 0 and loss_val > self.losses[0][1] * 10):
+                if np.isnan(loss_val) or (len(self.losses) > 0 and loss_val+1 > (self.losses[0][1]+1) * 10):  # TODO +1 is a hotfix to handle negative losses properly
                     # self.session.run(
                     #     [self.loss_op, self.train_op, self.global_norm_op, self.global_norm1_op, self.global_norm2_op])
+                    print("stop")
                     break
 
                 if validate:
@@ -386,7 +398,7 @@ class Smoe:
         print("end loss/mse: ", loss_val, "/", mse_val,  "@iter: ", i)
         print("best loss/mse: ", self.best_loss, "/", self.best_mse)
 
-    def run_batched(self, pis_l1=0, train=True, update_reconstruction=False):
+    def run_batched(self, pis_l1=0, u_l1=0, train=True, update_reconstruction=False):
         self.valid = False
 
         self.session.run(self.zero_op)
@@ -416,7 +428,8 @@ class Smoe:
             results = self.session.run(retrieve,
                                             feed_dict={self.start: start,
                                                        self.end: end,
-                                                       self.pis_l1: pis_l1})  # / self.batches
+                                                       self.pis_l1: pis_l1,
+                                                       self.u_l1: u_l1})  # / self.batches
 
             #    pctx.profiler.profile_operations(options=opts)
             #    exit()

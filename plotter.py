@@ -1,5 +1,5 @@
-# from sklearn.metrics import mean_squared_error
-# from skimage.measure import compare_ssim
+from sklearn.metrics import mean_squared_error
+from skimage.measure import compare_ssim
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
@@ -20,12 +20,12 @@ class ImagePlotter:
         self.options = options
         self.quiet = quiet
 
-        # if self.path is not None:
-        #     if not os.path.exists(path):
-        #         os.mkdir(path)
-        #     else:
-        #         files = glob.glob(path + "/*")
-        #         list(map(lambda x: os.remove(x), files))
+        if self.path is not None:
+            if not os.path.exists(path):
+                os.mkdir(path)
+            else:
+                files = glob.glob(path + "/*")
+                list(map(lambda x: os.remove(x), files))
 
         # TODO not nice
         num_options = len(self.options)
@@ -91,8 +91,9 @@ class ImagePlotter:
                 # TODO hist hotfix
                 ax = self.axes[-1]
                 params = smoe.get_params()
-                ax.hist(params['pis'], 500)
-                used = np.count_nonzero(params['pis'] > 0)
+                pis_pos_idx = params['pis'] > 0
+                ax.hist(params['pis'][pis_pos_idx], 500)
+                used = np.count_nonzero(pis_pos_idx)
                 total = params['pis'].shape[0]
                 ax.set_title('{0:d} / {1:d} ({2:.2f})'.format(used, total, 100. * used / total))
 
@@ -195,3 +196,69 @@ class LossPlotter:
 
     def __del__(self):
         plt.close(self.fig)
+
+
+class DenoisePlotter:
+    def __init__(self, y, z, ref, path=None):
+        self.path = path
+        if self.path and not os.path.exists(self.path):
+            os.mkdir(self.path)
+
+        self.y = y
+        self.z = z
+        self.ref = ref
+        self.psnrs = []
+
+        self.fig = plt.figure(figsize=(12, 7))
+
+        self.num_plots = 4
+        gs = GridSpec(2, self.num_plots)
+
+        self.axes = []
+        for i in range(self.num_plots):
+            self.axes.append(self.fig.add_subplot(gs[0, i]))
+
+        self.axes.append(self.fig.add_subplot(gs[1, :]))
+
+        # self.axes[2].set_title('denoised \n mse: '+str(round(mse,2))+' psnr '+str(round(psnr,2))+' ssim: '+str(round(ssim,2)))
+        self.axes[0].set_title("original")
+        self.axes[0].imshow(self.y, cmap='gray', interpolation='None', vmin=0, vmax=1)
+
+        y_est = self.ref
+        mse = mean_squared_error(y_est * 255, self.y * 255)
+        psnr = 10 * np.log10(255 ** 2 / mse)
+        # ssim = compare_ssim(y_est, self.y, data_range=1)
+
+        self.axes[2].set_title('reference \n mse: ' + str(round(mse, 2)) + ' psnr ' + str(round(psnr, 2)))
+        self.axes[2].imshow(y_est, cmap='gray', interpolation='None', vmin=0, vmax=1)
+
+        self.axes[3].set_title("noisy input")
+        self.axes[3].imshow(self.z, cmap='gray', interpolation='None', vmin=0, vmax=1)
+
+    def plot(self, smoe):
+
+        # for ax in self.axes:
+        #    ax.clear()
+
+
+        y_est = smoe.get_reconstruction()
+        mse = mean_squared_error(y_est * 255, self.y * 255)
+        psnr = 10 * np.log10(255 ** 2 / mse)
+        self.psnrs.append(psnr)
+        # ssim = compare_ssim(y_est, self.y, data_range=1)
+
+        self.axes[1].clear()
+        # self.axes[1].set_title('denoised \n mse: '+str(round(mse,2))+' psnr '+str(round(psnr,2))+' ssim: '+str(round(ssim,2)))
+        self.axes[1].set_title('reconstruction \n mse: ' + str(round(mse, 2)) + ' psnr ' + str(round(psnr, 2)))
+        self.axes[1].imshow(y_est, cmap='gray', interpolation='None', vmin=0, vmax=1)
+
+        self.axes[4].clear()
+        self.axes[4].set_title("Max: {0:.2f}, Last: {1:.2f}".format(np.max(self.psnrs), self.psnrs[-1]))
+        self.axes[4].set_ylabel("PSNR in dB")
+        self.axes[4].plot(self.psnrs)
+
+        self.fig.canvas.draw()
+
+        if self.path:
+            name = "/{0:08d}.png".format(smoe.get_iter())
+            self.fig.savefig(self.path + "/" + name, dpi=600)

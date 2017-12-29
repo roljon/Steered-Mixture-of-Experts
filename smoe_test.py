@@ -30,9 +30,9 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
             shutil.rmtree(results_path)
         os.mkdir(results_path)
 
-    logger = ModelLogger(path=results_path)
     loss_plotter = LossPlotter(path=results_path + "/loss.png", quiet=True)
     image_plotter = ImagePlotter(path=results_path, options=['orig', 'reconstruction', 'pis_hist'], quiet=True) # , 'gating'
+    logger = ModelLogger(path=results_path)
 
     smoe = Smoe(orig, kernels_per_dim, init_params=init_params, pis_relu=True, train_pis=True, start_batches=batches)
 
