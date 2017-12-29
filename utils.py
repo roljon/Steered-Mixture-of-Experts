@@ -29,5 +29,5 @@ def save_model(smoe, path, best=False, reduce=True):
 def load_params(path):
     with open(path, 'rb') as fd:
         params = pickle.load(fd)['params']
-        params['musX'] = np.transpose(params['musX'])
+        #params['musX'] = np.transpose(params['musX'])
     return params
