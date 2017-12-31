@@ -97,6 +97,9 @@ class Smoe:
         self.init_model(self.domain, self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.U_init,
                         train_pis, sqrt_pis, pis_relu)
 
+    def __del__(self):
+        self.session.close()
+
     # TODO use self for init vars or refactor to a ModelParams class
     def init_model(self, domain_init, nu_e_init, gamma_e_init, pis_init, musX_init, U_init, train_pis=True,
                    sqrt_pis=False, pis_relu=False):
@@ -205,8 +208,10 @@ class Smoe:
 
         self.pis_l1 = tf.placeholder(tf.float32)
         self.u_l1 = tf.placeholder(tf.float32)
-        self.loss_op = mse + self.pis_l1 * tf.reduce_sum(pis)  # / tf.cast(self.num_pi_op, dtype=tf.float32)
-        self.loss_op = mse + self.u_l1 * tf.reduce_sum(U)  # / tf.cast(self.num_pi_op, dtype=tf.float32)
+        pis_l1 = self.pis_l1 * tf.reduce_sum(pis) / self.start_pis
+        u_l1 = self.u_l1 * tf.reduce_sum(U)  # TODO add: / self.start_pis
+
+        self.loss_op = mse + pis_l1 + u_l1
 
         self.mse_op = mse * (255 ** 2)
 
