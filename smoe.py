@@ -98,7 +98,8 @@ class Smoe:
                         train_pis, sqrt_pis, pis_relu)
 
     def __del__(self):
-        self.session.close()
+        # self.session.close()
+        pass
 
     # TODO use self for init vars or refactor to a ModelParams class
     def init_model(self, domain_init, nu_e_init, gamma_e_init, pis_init, musX_init, U_init, train_pis=True,
@@ -158,36 +159,28 @@ class Smoe:
         gamma_e = self.gamma_e_var
         #"""
 
-        # prepare domain
-        domain_exp = self.domain_op
-        domain_exp = tf.tile(tf.expand_dims(domain_exp, axis=0), (1, 1, 1))
+        jit_scope = tf.contrib.compiler.jit.experimental_jit_scope
+        #with True: jit_scope():
+        if True:
+            # prepare domain
+            domain_exp = self.domain_op
+            domain_exp = tf.tile(tf.expand_dims(domain_exp, axis=0), (1, 1, 1))
 
-        X = domain_exp - musX
-        Q = tf.linalg.triangular_solve(U, tf.transpose(X, perm=[0, 2, 1]))
-        """
-        transp = tf.transpose(X, perm=[0, 2, 1])
-        u1 = U[:32768]
-        u2 = U[32768:]
-        x1 = transp[:32768]
-        x2 = transp[32768:]
-        with tf.device("/cpu:0"):
-            Q1 = tf.linalg.triangular_solve(u1, x1,name="kjgvjsvb")
-            Q2 = tf.linalg.triangular_solve(u2, x2)
-            Q = tf.concat([Q1, Q2], axis=0)
-        #"""
+            X = domain_exp - musX
+            Q = tf.linalg.triangular_solve(U, tf.transpose(X, perm=[0, 2, 1]))
 
-        q = tf.reduce_sum(Q * Q, axis=1)
-        d = domain_init.shape[1]
-        c = d * tf.log(2 * np.pi) + 2 * tf.reduce_sum(tf.log(tf.matrix_diag_part(U)), axis=1)
-        y = -(tf.expand_dims(c, axis=1) + q) / 2
-        w_e = tf.exp(y)
+            q = tf.reduce_sum(Q * Q, axis=1)
+            d = domain_init.shape[1]
+            c = d * tf.log(2 * np.pi) + 2 * tf.reduce_sum(tf.log(tf.matrix_diag_part(U)), axis=1)
+            y = -(tf.expand_dims(c, axis=1) + q) / 2
+            w_e = tf.exp(y)
 
-        w_e *= tf.expand_dims(pis, axis=-1)
-        w_dewnom = tf.reduce_sum(w_e, axis=0)
-        self.w_e_op = w_e / w_dewnom
+            w_e *= tf.expand_dims(pis, axis=-1)
+            w_dewnom = tf.reduce_sum(w_e, axis=0)
+            self.w_e_op = w_e / w_dewnom
 
-        self.res = tf.reduce_sum((tf.matmul(gamma_e, tf.transpose(self.domain_op)) + tf.expand_dims(nu_e, axis=-1))
-                                 * self.w_e_op, axis=0)
+            self.res = tf.reduce_sum((tf.matmul(gamma_e, tf.transpose(self.domain_op)) + tf.expand_dims(nu_e, axis=-1))
+                                     * self.w_e_op, axis=0)
 
         # checkpoint op
         self.pis_best_var = tf.Variable(self.pis_var)
@@ -432,12 +425,22 @@ class Smoe:
             #    pctx.trace_next_step()
             #    # Dump the profile to '/tmp/train_dir' after the step.
             #    pctx.dump_next_step()
+            #metadata = tf.RunMetadata()
 
             results = self.session.run(retrieve,
                                        feed_dict={self.start: start,
                                                   self.end: end,
                                                   self.pis_l1: pis_l1,
-                                                  self.u_l1: u_l1})  # / self.batches
+                                                  self.u_l1: u_l1})#,options=tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE,
+            #             output_partition_graphs=True),
+            #             run_metadata=metadata)
+
+            #timeline_ = timeline.Timeline(metadata.step_stats)
+            #with open("dynamic_stitch_gpu_profile.json", "w") as f:
+            #    f.write(timeline_.generate_chrome_trace_format())
+            #with open("dynamic_stitch_gpu_profile.pbtxt", "w") as f:
+            #    f.write(str(metadata))
+            #exit()
 
             #    pctx.profiler.profile_operations(options=opts)
             #    exit()

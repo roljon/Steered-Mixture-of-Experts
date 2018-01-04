@@ -43,9 +43,9 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
                callbacks=[loss_plotter.plot, image_plotter.plot, logger.log])
 
     #restart = True
-    num = 10
-    start_reg = 0.000001
-    end_reg = 0.01 #0.03
+    num = 50
+    start_reg = 1.
+    end_reg = 50.
     regs = np.linspace(start_reg, end_reg, num)
 
     #regs = np.flipud(0.03/np.linspace(1, 30000, 200))
