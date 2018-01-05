@@ -131,7 +131,7 @@ class Smoe:
 
         # prepare U
         U_mask_init = np.ones_like(U_init)
-        U_mask_init[:, 0, 1] = 0
+        #U_mask_init[:, 1, 0] = 0
 
         U_mask = tf.constant(U_mask_init, tf.float32)
 
@@ -210,7 +210,16 @@ class Smoe:
         self.pis_l1 = tf.placeholder(tf.float32)
         self.u_l1 = tf.placeholder(tf.float32)
         pis_l1 = self.pis_l1 * tf.reduce_sum(pis) / self.start_pis
-        u_l1 = self.u_l1 * tf.reduce_sum(U)  # TODO add: / self.start_pis
+        #u_l1 = self.u_l1 * tf.reduce_sum(U)  # TODO add: / self.start_pis
+        rxx = U*tf.transpose(U, perm=[0,2,1])  # TODO not rxx!
+        sigma1 = tf.sqrt(rxx[:, 0, 0])
+        sigma2 = tf.sqrt(rxx[:, 1, 1])
+
+        #sigma1 = tf.minimum(sigma1, 20 * self.get_sigma())
+        #sigma2 = tf.minimum(sigma2, 20 * self.get_sigma())
+
+        div = tf.where(sigma2 < sigma1, sigma1 / sigma2, sigma2 / sigma1)
+        u_l1 = self.u_l1 * tf.reduce_sum((sigma1 + sigma2) / div)
 
         self.loss_op = mse + pis_l1 + u_l1
 
