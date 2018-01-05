@@ -6,7 +6,7 @@ from tensorflow.python.client import timeline
 
 class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, sqrt_pis=False, pis_relu=False,
-                 init_params=None, start_batches=1):
+                 init_params=None, start_batches=1, minibatch_trainig=False):
         self.domain = None
 
         # init params
@@ -46,6 +46,7 @@ class Smoe:
         self.start = None
         self.end = None
         self.num_pi_op = None
+        self.mini_idxs = None
 
         # optimizers
         self.optimizer1 = None
@@ -95,7 +96,7 @@ class Smoe:
         # self.session = tf.Session()
 
         self.init_model(self.domain, self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.U_init,
-                        train_pis, sqrt_pis, pis_relu)
+                        train_pis, sqrt_pis, pis_relu, minibatch_trainig)
 
     def __del__(self):
         # self.session.close()
@@ -103,7 +104,7 @@ class Smoe:
 
     # TODO use self for init vars or refactor to a ModelParams class
     def init_model(self, domain_init, nu_e_init, gamma_e_init, pis_init, musX_init, U_init, train_pis=True,
-                   sqrt_pis=False, pis_relu=False):
+                   sqrt_pis=False, pis_relu=False, minibatch_trainig=False):
 
         self.nu_e_var = tf.Variable(nu_e_init, dtype=tf.float32)
         self.gamma_e_var = tf.Variable(gamma_e_init, dtype=tf.float32)
@@ -116,10 +117,17 @@ class Smoe:
         self.target_op = tf.constant(self.image_flat, dtype=tf.float32)
         self.domain_op = tf.constant(domain_init, dtype=tf.float32)
 
-        self.start = tf.placeholder(dtype=tf.int32)
-        self.end = tf.placeholder(dtype=tf.int32)
-        self.target_op = self.target_op[self.start:self.end]
-        self.domain_op = self.domain_op[self.start:self.end]
+        if not minibatch_trainig:
+            self.start = tf.placeholder(dtype=tf.int32)
+            self.end = tf.placeholder(dtype=tf.int32)
+            self.target_op = self.target_op[self.start:self.end]
+            self.domain_op = self.domain_op[self.start:self.end]
+        else:
+            self.mini_idxs = tf.placeholder(shape=[None], dtype=tf.int32)
+            print(self.mini_idxs.shape)
+            self.target_op = tf.gather(self.target_op, self.mini_idxs)
+            self.domain_op = tf.gather(self.domain_op, self.mini_idxs)
+
 
         # prepare U
         U_mask_init = np.ones_like(U_init)
@@ -356,9 +364,11 @@ class Smoe:
             try:
                 validate = i % val_iter == 0
 
-                self.batches = math.ceil(self.start_batches * (num_pi / self.start_pis))
-                # print("{0} -> {1} batches".format(self.start_batches, self.batches))
-                self.intervals = self.calc_intervals(self.image_flat.size, self.batches)
+                # only recalculate batches if no minibatch training is enabled
+                if self.mini_idxs is None:
+                    self.batches = math.ceil(self.start_batches * (num_pi / self.start_pis))
+                    # print("{0} -> {1} batches".format(self.start_batches, self.batches))
+                    self.intervals = self.calc_intervals(self.image_flat.size, self.batches)
 
                 loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=True,
                                                              update_reconstruction=validate)
@@ -399,8 +409,36 @@ class Smoe:
         print("end loss/mse: ", loss_val, "/", mse_val, "@iter: ", i)
         print("best loss/mse: ", self.best_loss, "/", self.best_mse)
 
+    def run_minibatched(self, pis_l1=0, u_l1=0):
+
+        idxs = np.arange(self.image_flat.size)
+        np.random.shuffle(idxs)
+
+        loss_val, mse_val, num_pis = 0, 0, 0
+
+        for start, end in self.intervals:
+            mini_idxs = idxs[start:end]
+            self.session.run(self.zero_op)
+            loss, mse, num_pi, _ = self.session.run([self.loss_op, self.mse_op, self.num_pi_op, self.accum_ops],
+                                       feed_dict={self.mini_idxs: mini_idxs,
+                                                  self.pis_l1: pis_l1,
+                                                  self.u_l1: u_l1})
+            self.session.run(self.train_op)
+
+            loss_val += loss * (end - start) / self.image_flat.size
+            mse_val += mse * (end - start) / self.image_flat.size
+            num_pis = num_pi * (end - start) / self.image_flat.size
+
+        return loss_val, mse_val, num_pis
+
+
+
     def run_batched(self, pis_l1=0, u_l1=0, train=True, update_reconstruction=False):
         self.valid = False
+
+        # TODO just for testing
+        if self.mini_idxs is not None and train is True:
+            return self.run_minibatched(pis_l1=pis_l1, u_l1=u_l1)
 
         self.session.run(self.zero_op)
 
@@ -410,11 +448,12 @@ class Smoe:
         # only for update update_reconstruction=True
         reconstructions = []
         w_es = []
+
         for start, end in self.intervals:
             retrieve = [self.loss_op, self.mse_op, self.num_pi_op, self.accum_ops]
             if update_reconstruction:
-                # retrieve += [self.res, self.w_e_op]
-                retrieve += [self.res]
+                retrieve += [self.res, self.w_e_op]
+                #retrieve += [self.res]
 
             # builder = tf.profiler.ProfileOptionBuilder
             # opts = builder(builder.time_and_memory()).order_by('micros').build()
@@ -427,11 +466,21 @@ class Smoe:
             #    pctx.dump_next_step()
             #metadata = tf.RunMetadata()
 
-            results = self.session.run(retrieve,
-                                       feed_dict={self.start: start,
-                                                  self.end: end,
-                                                  self.pis_l1: pis_l1,
-                                                  self.u_l1: u_l1})#,options=tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE,
+            if self.mini_idxs is not None:
+                if 'done' in locals():
+                    break
+                results = self.session.run(retrieve,
+                                           feed_dict={self.mini_idxs: np.arange(self.image_flat.size),
+                                                      self.pis_l1: pis_l1,
+                                                      self.u_l1: u_l1})
+                done = True
+
+            else:
+                results = self.session.run(retrieve,
+                                           feed_dict={self.start: start,
+                                                      self.end: end,
+                                                      self.pis_l1: pis_l1,
+                                                      self.u_l1: u_l1})#,options=tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE,
             #             output_partition_graphs=True),
             #             run_metadata=metadata)
 
@@ -447,7 +496,7 @@ class Smoe:
 
             if update_reconstruction:
                 reconstructions.append(results[4])
-                # w_es.append(results[5])
+                w_es.append(results[5])
 
             loss_val += results[0] * (end - start) / self.image_flat.size
             mse_val += results[1] * (end - start) / self.image_flat.size
@@ -456,7 +505,7 @@ class Smoe:
         if update_reconstruction:
             reconstruction = np.concatenate(reconstructions)
             self.reconstruction_image = reconstruction.reshape(self.image.shape)
-            # self.weight_matrix = np.concatenate(w_es, axis=1)
+            self.weight_matrix = np.concatenate(w_es, axis=1)
             self.valid = True
 
         if train:
@@ -477,12 +526,12 @@ class Smoe:
         return self.reconstruction_image
 
     def get_weight_matrix(self):
-        print("currently commented out in run_batched")
-        raise NotImplementedError
+        # print("currently commented out in run_batched")
+        # raise NotImplementedError
 
-        # if not self.valid:
-        #     self.run_batched(train=False, update_reconstruction=True)
-        # return self.weight_matrix
+        if not self.valid:
+            self.run_batched(train=False, update_reconstruction=True)
+        return self.weight_matrix
 
     def get_best_params(self):
         pis, musX, U, gamma_e, nu_e = self.session.run([self.pis_best_var, self.musX_best_var, self.U_best_var,
@@ -607,7 +656,7 @@ class Smoe:
     @staticmethod
     def calc_intervals(in_size, batches):
         start = 0
-        steps = np.linspace(0, in_size, num=max(2, batches), endpoint=True)
+        steps = np.linspace(0, in_size, num=max(2, batches+1), endpoint=True)
         intervals = []
         for end in steps[1:]:
             end = int(end)
@@ -615,3 +664,6 @@ class Smoe:
             start = end
 
         return intervals
+
+    def get_sigma(self):
+        return self.domain[0,0]
