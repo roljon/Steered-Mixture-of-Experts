@@ -83,10 +83,8 @@ class ImagePlotter:
             elif option == "reconstruction":
                 ax.imshow(smoe.get_reconstruction(), cmap='gray', interpolation='None', vmin=0, vmax=1)
             elif option == "gating":
-                # TODO fix MemoryError for large models
-                w_e_opt = smoe.get_weight_matrix()
-                dim_size = int(np.sqrt(w_e_opt.shape[1]))
-                ax.imshow(w_e_opt.argmax(axis=0).reshape((dim_size, dim_size)), interpolation='None')
+                w_e_opt = smoe.get_weight_matrix_argmax()
+                ax.imshow(w_e_opt, interpolation='None', cmap='prism')
             elif option == "pis_hist":
                 # TODO hist hotfix
                 ax = self.axes[-1]
@@ -220,19 +218,27 @@ class DenoisePlotter:
 
         self.axes.append(self.fig.add_subplot(gs[1, :]))
 
-        # self.axes[2].set_title('denoised \n mse: '+str(round(mse,2))+' psnr '+str(round(psnr,2))+' ssim: '+str(round(ssim,2)))
         self.axes[0].set_title("original")
         self.axes[0].imshow(self.y, cmap='gray', interpolation='None', vmin=0, vmax=1)
 
         y_est = self.ref
         mse = mean_squared_error(y_est * 255, self.y * 255)
         psnr = 10 * np.log10(255 ** 2 / mse)
-        # ssim = compare_ssim(y_est, self.y, data_range=1)
+        ssim = compare_ssim(y_est, self.y, data_range=1)
 
-        self.axes[2].set_title('reference \n mse: ' + str(round(mse, 2)) + ' psnr ' + str(round(psnr, 2)))
+        self.axes[2].set_title('reference \n mse: '+str(round(mse,2))+' psnr '+str(round(psnr,2))+'\n ssim: '+str(round(ssim,2)))
+        # self.axes[2].set_title('reference \n mse: ' + str(round(mse, 2)) + ' psnr ' + str(round(psnr, 2)))
         self.axes[2].imshow(y_est, cmap='gray', interpolation='None', vmin=0, vmax=1)
 
-        self.axes[3].set_title("noisy input")
+        y_est = self.z
+        mse = mean_squared_error(y_est * 255, self.y * 255)
+        psnr = 10 * np.log10(255 ** 2 / mse)
+        ssim = compare_ssim(y_est, self.y, data_range=1)
+
+        self.axes[3].set_title(
+            'noisy input \n mse: ' + str(round(mse, 2)) + ' psnr ' + str(round(psnr, 2)) + '\n ssim: ' + str(
+                round(ssim, 2)))
+        # self.axes[3].set_title('noisy input \n mse: ' + str(round(mse, 2)) + ' psnr ' + str(round(psnr, 2)))
         self.axes[3].imshow(self.z, cmap='gray', interpolation='None', vmin=0, vmax=1)
 
     def plot(self, smoe):
@@ -245,11 +251,11 @@ class DenoisePlotter:
         mse = mean_squared_error(y_est * 255, self.y * 255)
         psnr = 10 * np.log10(255 ** 2 / mse)
         self.psnrs.append(psnr)
-        # ssim = compare_ssim(y_est, self.y, data_range=1)
+        ssim = compare_ssim(y_est, self.y, data_range=1)
 
         self.axes[1].clear()
-        # self.axes[1].set_title('denoised \n mse: '+str(round(mse,2))+' psnr '+str(round(psnr,2))+' ssim: '+str(round(ssim,2)))
-        self.axes[1].set_title('reconstruction \n mse: ' + str(round(mse, 2)) + ' psnr ' + str(round(psnr, 2)))
+        self.axes[1].set_title('denoised \n mse: '+str(round(mse,2))+' psnr '+str(round(psnr,2))+'\n ssim: '+str(round(ssim,2)))
+        # self.axes[1].set_title('reconstruction \n mse: ' + str(round(mse, 2)) + ' psnr ' + str(round(psnr, 2)))
         self.axes[1].imshow(y_est, cmap='gray', interpolation='None', vmin=0, vmax=1)
 
         self.axes[4].clear()

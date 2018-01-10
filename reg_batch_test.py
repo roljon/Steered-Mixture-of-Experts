@@ -31,7 +31,7 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
         os.mkdir(results_path)
 
     loss_plotter = LossPlotter(path=results_path + "/loss.png", quiet=True)
-    image_plotter = ImagePlotter(path=results_path, options=['orig', 'reconstruction', 'pis_hist'], quiet=True)
+    image_plotter = ImagePlotter(path=results_path, options=['orig', 'reconstruction', 'gating', 'pis_hist'], quiet=True)
     logger = ModelLogger(path=results_path)
 
     smoe = Smoe(orig, kernels_per_dim, init_params=init_params, pis_relu=True, train_pis=True, start_batches=batches)
@@ -44,8 +44,8 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
 
     #restart = True
     num = 50
-    start_reg = 1.
-    end_reg = 50.
+    start_reg = 0.
+    end_reg = 3.
     regs = np.linspace(start_reg, end_reg, num)
 
     #regs = np.flipud(0.03/np.linspace(1, 30000, 200))

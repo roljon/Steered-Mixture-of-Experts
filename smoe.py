@@ -32,6 +32,7 @@ class Smoe:
         # tf ops
         self.restoration_op = None
         self.w_e_op = None
+        self.w_e_max_op = None
         self.loss_op = None
         self.train_op = None
         self.checkpoint_best_op = None
@@ -65,7 +66,7 @@ class Smoe:
         self.iter = 0
         self.valid = False
         self.reconstruction_image = None
-        self.weight_matrix = None
+        self.weight_matrix_argmax = None
 
         # generate initializations
         self.image = image
@@ -124,19 +125,19 @@ class Smoe:
             self.domain_op = self.domain_op[self.start:self.end]
         else:
             self.mini_idxs = tf.placeholder(shape=[None], dtype=tf.int32)
-            print(self.mini_idxs.shape)
             self.target_op = tf.gather(self.target_op, self.mini_idxs)
             self.domain_op = tf.gather(self.domain_op, self.mini_idxs)
 
 
         # prepare U
-        U_mask_init = np.ones_like(U_init)
-        #U_mask_init[:, 1, 0] = 0
-
-        U_mask = tf.constant(U_mask_init, tf.float32)
-
-        U = self.U_var * U_mask
-        U = tf.maximum(10e-8, U)  # TODO Hotfix to prevent <= 0 values in diag(U) for log calculation for c
+        # U_mask_init = np.ones_like(U_init)
+        # U_mask_init[:, 1, 0] = 0
+        #
+        # U_mask = tf.constant(U_mask_init, tf.float32)
+        #
+        # U = self.U_var * U_mask
+        #U = tf.maximum(10e-8, U)  # TODO Hotfix to prevent <= 0 values in diag(U) for log calculation for c
+        U = self.U_var
 
         if train_pis:
             self.pis_var = tf.Variable(pis_init, trainable=train_pis, dtype=tf.float32)
@@ -154,9 +155,10 @@ class Smoe:
         musX = tf.expand_dims(self.musX_var, axis=1)
 
         pis_mask = pis > 0
+
         # filter out all vars for pi <= 0
         # TODO this should be an option
-        # """
+        #"""
         musX = tf.boolean_mask(musX, pis_mask)
         nu_e = tf.boolean_mask(self.nu_e_var, pis_mask)
         gamma_e = tf.boolean_mask(self.gamma_e_var, pis_mask)
@@ -167,28 +169,28 @@ class Smoe:
         gamma_e = self.gamma_e_var
         #"""
 
-        jit_scope = tf.contrib.compiler.jit.experimental_jit_scope
-        #with True: jit_scope():
-        if True:
-            # prepare domain
-            domain_exp = self.domain_op
-            domain_exp = tf.tile(tf.expand_dims(domain_exp, axis=0), (1, 1, 1))
+        n_div = tf.reduce_prod(tf.matrix_diag_part(U), axis=-1)
+        n_dis = np.sqrt(np.power(2*np.pi, 2))
+        n_quo = n_div / n_dis
 
-            X = domain_exp - musX
-            Q = tf.linalg.triangular_solve(U, tf.transpose(X, perm=[0, 2, 1]))
+        # prepare domain
+        domain_exp = self.domain_op
+        domain_exp = tf.tile(tf.expand_dims(domain_exp, axis=0), (tf.shape(musX)[0], 1, 1))
 
-            q = tf.reduce_sum(Q * Q, axis=1)
-            d = domain_init.shape[1]
-            c = d * tf.log(2 * np.pi) + 2 * tf.reduce_sum(tf.log(tf.matrix_diag_part(U)), axis=1)
-            y = -(tf.expand_dims(c, axis=1) + q) / 2
-            w_e = tf.exp(y)
+        x_sub_mu = tf.expand_dims(domain_exp - musX, axis=-1)
+        # TODO rename U to A
+        n_exp = tf.exp(-1 / 2 * tf.einsum('abli,alm,aml,abmj->ab', x_sub_mu, U, U, x_sub_mu))
 
-            w_e *= tf.expand_dims(pis, axis=-1)
-            w_dewnom = tf.reduce_sum(w_e, axis=0)
-            self.w_e_op = w_e / w_dewnom
+        N = tf.tile(tf.expand_dims(n_quo, axis=1), (1, tf.shape(n_exp)[1])) * n_exp
 
-            self.res = tf.reduce_sum((tf.matmul(gamma_e, tf.transpose(self.domain_op)) + tf.expand_dims(nu_e, axis=-1))
-                                     * self.w_e_op, axis=0)
+        n_w = N * tf.expand_dims(pis, axis=-1)
+        n_w_norm = tf.reduce_sum(n_w, axis=0)
+
+        self.w_e_op = n_w / n_w_norm
+        self.w_e_max_op = tf.argmax(self.w_e_op, axis=0)
+
+        self.res = tf.reduce_sum(self.w_e_op * (tf.matmul(gamma_e, tf.transpose(self.domain_op)) + tf.expand_dims(nu_e, axis=-1)), axis=0)
+
 
         # checkpoint op
         self.pis_best_var = tf.Variable(self.pis_var)
@@ -205,21 +207,17 @@ class Smoe:
         # mse = tf.reduce_sum(tf.square(self.restoration_op - target)) / tf.size(target, out_type=tf.float32)
         mse = tf.reduce_sum(tf.square(self.res - self.target_op)) / tf.cast(tf.size(self.target_op), dtype=tf.float32)
 
-        self.num_pi_op = tf.shape(pis)[0]
+        self.num_pi_op = tf.count_nonzero(pis_mask)  # TODO tf.shape(pis)[0]
 
         self.pis_l1 = tf.placeholder(tf.float32)
         self.u_l1 = tf.placeholder(tf.float32)
-        pis_l1 = self.pis_l1 * tf.reduce_sum(pis) / self.start_pis
-        #u_l1 = self.u_l1 * tf.reduce_sum(U)  # TODO add: / self.start_pis
-        rxx = U*tf.transpose(U, perm=[0,2,1])  # TODO not rxx!
-        sigma1 = tf.sqrt(rxx[:, 0, 0])
-        sigma2 = tf.sqrt(rxx[:, 1, 1])
+        pis_l1 = self.pis_l1 * tf.reduce_sum(pis) * (tf.cast(self.num_pi_op, tf.float32) / self.start_pis)
 
-        #sigma1 = tf.minimum(sigma1, 20 * self.get_sigma())
-        #sigma2 = tf.minimum(sigma2, 20 * self.get_sigma())
-
-        div = tf.where(sigma2 < sigma1, sigma1 / sigma2, sigma2 / sigma1)
-        u_l1 = self.u_l1 * tf.reduce_sum((sigma1 + sigma2) / div)
+        # TODO work in progess
+        rxx_det = 1/tf.reduce_prod(tf.matrix_diag_part(U), axis=-1)**2
+        u_l1 = self.u_l1 * tf.reduce_sum(1/rxx_det) * (tf.cast(self.num_pi_op, tf.float32) / self.start_pis)
+        #u_l1 = self.u_l1 * tf.reduce_sum(U) * (tf.cast(self.num_pi_op, tf.float32) / self.start_pis)
+        #'''
 
         self.loss_op = mse + pis_l1 + u_l1
 
@@ -233,7 +231,7 @@ class Smoe:
         if optimizer2 is not None:
             self.optimizer2 = optimizer2
 
-        var_opt1 = [self.musX_var, self.nu_e_var, self.gamma_e_var, self.U_var]
+        var_opt1 = [self.nu_e_var, self.gamma_e_var, self.musX_var, self.U_var]
         var_opt2 = [self.pis_var]
 
         # sort out not trainable vars
@@ -250,8 +248,10 @@ class Smoe:
             # gradients, _ = tf.clip_by_global_norm(gradients, 1)
             # print(type(gradients), gradients)
             self.gradients = [tf.clip_by_value(g, -grad_clip_value_abs, grad_clip_value_abs) for g in self.gradients]
-
+            #accum_gradients = [tf.clip_by_value(g, -grad_clip_value_abs, grad_clip_value_abs) for g in accum_gradients]
+            #accum_gradients, _ = tf.clip_by_global_norm(accum_gradients, 0.1)
             # self.gradients = [tf.clip_by_norm(g, grad_clip_value_abs) for g in self.gradients]
+        #accum_gradients, _ = tf.clip_by_global_norm(accum_gradients, 0.1)
 
         if self.optimizer2 is None or len(var_opt2) == 0:
             # self.train_op = self.optimizer1.apply_gradients(zip(self.gradients, var_opt1 + var_opt2))
@@ -262,6 +262,8 @@ class Smoe:
             # gradients2 = self.gradients[len(var_opt1):]
             gradients1 = accum_gradients[:len(var_opt1)]
             gradients2 = accum_gradients[len(var_opt1):]
+            #gradients1 = [tf.clip_by_value(g, -grad_clip_value_abs, grad_clip_value_abs) for g in gradients1]
+            #gradients2 = [tf.clip_by_value(g, -grad_clip_value_abs, grad_clip_value_abs) for g in gradients2]
 
             """
             accum_gradients1 = [tf.Variable(tf.zeros_like(var.initialized_value()), trainable=False)
@@ -281,17 +283,18 @@ class Smoe:
             #"""
 
             # TODO work in progess
-            # """
+            """
             # for  grad in gradients1:
             #    print (grad.shape)
             pis_relu = tf.nn.relu(self.pis_var)
-            pis_norm = pis_relu / tf.reduce_sum(pis_relu)
+            #pis_norm = pis_relu / tf.reduce_sum(pis_relu)
             # pis_norm = tf.expand_dims(pis_norm, axis=1)
-            pis_norm = pis_norm * tf.cast(tf.count_nonzero(pis_norm), tf.float32)
-            pis_norm = tf.maximum(10e-8, pis_norm)
+            pis_norm = pis_relu / tf.cast(self.num_pi_op, tf.float32)
+            #pis_norm = tf.maximum(10e-8, pis_norm)
 
             pis_norm1 = tf.expand_dims(pis_norm, axis=-1)
             pis_norm2 = tf.expand_dims(pis_norm1, axis=-1)
+            new_grads = []
             for grad in gradients1:
                 if len(grad.shape) == 1:
                     grad /= pis_norm
@@ -301,6 +304,8 @@ class Smoe:
                     grad /= pis_norm2
                 else:
                     raise ValueError
+                new_grads.append(grad)
+            gradients1 = new_grads
 
             # gradients1 = [grad / pis_norm if len(grad.shape) == 2 else grad / tf.expand_dims(pis_norm, axis=-1) for grad
             #              in gradients1]
@@ -309,13 +314,14 @@ class Smoe:
             train_op2 = self.optimizer2.apply_gradients(zip(gradients2, var_opt2))
             self.train_op = tf.group(train_op1, train_op2)
 
+            # normalize pis to 1
             with tf.control_dependencies([self.train_op]):
                 pis_mask = self.pis_var > 0
                 pis = tf.where(pis_mask, self.pis_var, tf.zeros_like(self.pis_var))
                 pis /= tf.reduce_sum(pis)
                 assign_op = self.pis_var.assign(pis)
 
-            self.train_op = tf.group(assign_op, train_op2)
+            self.train_op = assign_op #tf.group(assign_op, self.train_op)
 
         uninitialized_vars = []
         for var in tf.global_variables():
@@ -327,9 +333,6 @@ class Smoe:
 
         init_new_vars_op = tf.variables_initializer(uninitialized_vars)
         self.session.run(init_new_vars_op)
-
-    def get_gradients(self):
-        return self.session.run(self.gradients)
 
     def train(self, num_iter, val_iter=100, optimizer1=None, optimizer2=None, grad_clip_value_abs=None, pis_l1=0,
               u_l1=0, callbacks=()):
@@ -373,18 +376,19 @@ class Smoe:
             try:
                 validate = i % val_iter == 0
 
+                # TODO this should be refactored into samples_per_batch or removed
                 # only recalculate batches if no minibatch training is enabled
-                if self.mini_idxs is None:
-                    self.batches = math.ceil(self.start_batches * (num_pi / self.start_pis))
-                    # print("{0} -> {1} batches".format(self.start_batches, self.batches))
-                    self.intervals = self.calc_intervals(self.image_flat.size, self.batches)
+                # if self.mini_idxs is None:
+                #    self.batches = math.ceil(self.start_batches * (num_pi / self.start_pis))
+                #    # print("{0} -> {1} batches".format(self.start_batches, self.batches))
+                #    self.intervals = self.calc_intervals(self.image_flat.size, self.batches)
 
                 loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=True,
                                                              update_reconstruction=validate)
 
                 # TODO take loss_history into account
                 if np.isnan(loss_val) or (len(self.losses) > 0 and loss_val + 1 > (
-                            self.losses[0][1] + 1) * 10):  # TODO +1 is a hotfix to handle negative losses properly
+                            self.losses[0][1] + 100) * 10):  # TODO +100 is a hotfix to handle negative losses properly
                     # self.session.run(
                     #     [self.loss_op, self.train_op, self.global_norm_op, self.global_norm1_op, self.global_norm2_op])
                     print("stop")
@@ -461,7 +465,7 @@ class Smoe:
         for start, end in self.intervals:
             retrieve = [self.loss_op, self.mse_op, self.num_pi_op, self.accum_ops]
             if update_reconstruction:
-                retrieve += [self.res, self.w_e_op]
+                retrieve += [self.res, self.w_e_max_op]
                 #retrieve += [self.res]
 
             # builder = tf.profiler.ProfileOptionBuilder
@@ -475,6 +479,7 @@ class Smoe:
             #    pctx.dump_next_step()
             #metadata = tf.RunMetadata()
 
+            #'''
             if self.mini_idxs is not None:
                 if 'done' in locals():
                     break
@@ -500,6 +505,44 @@ class Smoe:
             #    f.write(str(metadata))
             #exit()
 
+            '''
+            builder = tf.profiler.ProfileOptionBuilder
+            opts = builder(builder.time_and_memory()).order_by('micros').build()
+            with tf.contrib.tfprof.ProfileContext('profile',
+                                                 trace_steps=[],
+                                                 dump_steps=[]) as pctx:
+               # Enable tracing for next session.run.
+               pctx.trace_next_step()
+               # Dump the profile to '/tmp/train_dir' after the step.
+               pctx.dump_next_step()
+            metadata = tf.RunMetadata()
+
+            if self.mini_idxs is not None:
+                if 'done' in locals():
+                    break
+                results = self.session.run(retrieve,
+                                           feed_dict={self.mini_idxs: np.arange(self.image_flat.size),
+                                                      self.pis_l1: pis_l1,
+                                                      self.u_l1: u_l1})
+                done = True
+
+            else:
+                results = self.session.run(retrieve,
+                                           feed_dict={self.start: start,
+                                                      self.end: end,
+                                                      self.pis_l1: pis_l1,
+                                                      self.u_l1: u_l1},options=tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE,
+                         output_partition_graphs=True),
+                         run_metadata=metadata)
+
+            timeline_ = timeline.Timeline(metadata.step_stats)
+            with open("dynamic_stitch_gpu_profile.json", "w") as f:
+                f.write(timeline_.generate_chrome_trace_format())
+            with open("dynamic_stitch_gpu_profile.pbtxt", "w") as f:
+                f.write(str(metadata))
+            exit()
+            #'''
+
             #    pctx.profiler.profile_operations(options=opts)
             #    exit()
 
@@ -513,8 +556,9 @@ class Smoe:
 
         if update_reconstruction:
             reconstruction = np.concatenate(reconstructions)
+            w_e = np.concatenate(w_es)
             self.reconstruction_image = reconstruction.reshape(self.image.shape)
-            self.weight_matrix = np.concatenate(w_es, axis=1)
+            self.weight_matrix_argmax = w_e.reshape(self.image.shape)
             self.valid = True
 
         if train:
@@ -529,18 +573,22 @@ class Smoe:
         out_dict = {'pis': pis, 'musX': musX, 'U': U, 'gamma_e': gamma_e, 'nu_e': nu_e}
         return out_dict
 
+    def get_gradients(self):
+        raise NotImplementedError
+        #return self.session.run(self.gradients)
+
     def get_reconstruction(self):
         if not self.valid:
             self.run_batched(train=False, update_reconstruction=True)
         return self.reconstruction_image
 
-    def get_weight_matrix(self):
+    def get_weight_matrix_argmax(self):
         # print("currently commented out in run_batched")
         # raise NotImplementedError
 
         if not self.valid:
             self.run_batched(train=False, update_reconstruction=True)
-        return self.weight_matrix
+        return self.weight_matrix_argmax
 
     def get_best_params(self):
         pis, musX, U, gamma_e, nu_e = self.session.run([self.pis_best_var, self.musX_best_var, self.U_best_var,
@@ -594,7 +642,7 @@ class Smoe:
             for col in range(kernels_per_dim):
                 sig_1 = 1 / (2 * (kernels_per_dim + 1))
                 sig_2 = 1 / (2 * (kernels_per_dim + 1))
-                roh = 0  # np.random.uniform(-0.1, 0.1)
+                roh = 0 #np.random.uniform(-0.1, 0.1)
 
                 RsXX[row * kernels_per_dim + col] = np.array([[sig_1 * sig_1, roh * sig_1 * sig_2],
                                                               [roh * sig_1 * sig_2, sig_2 * sig_2]])
@@ -602,7 +650,7 @@ class Smoe:
         # self.U_init = np.zeros(shape=np.roll(RsXX.shape, 1), dtype=np.float32)
         self.U_init = np.zeros_like(RsXX)
         for k in range(self.U_init.shape[0]):
-            self.U_init[k] = np.linalg.cholesky(RsXX[k])
+            self.U_init[k] = np.linalg.cholesky(np.linalg.inv(RsXX[k]))
 
     def generate_experts(self, with_means=True):
         assert self.musX_init is not None, "need musX to generate experts"
@@ -626,7 +674,7 @@ class Smoe:
                 mean[k] = np.mean(self.image[y0:y1, x0:x1])
         else:
             mean = 0.5
-        print(mean.shape, self.gamma_e_init.shape, self.musX_init.shape)
+        #print(mean.shape, self.gamma_e_init.shape, self.musX_init.shape)
         self.nu_e_init = mean - np.sum(self.gamma_e_init * self.musX_init, axis=1)
         # self.nu_e_init = self.nu_e_init.reshape(1, self.musX_init.shape[1])
         # add a bit jitter
