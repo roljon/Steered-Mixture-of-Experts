@@ -44,6 +44,7 @@ class Smoe:
         self.start = None
         self.end = None
         self.num_pi_op = None
+        self.save_op = None
 
         # optimizers
         self.optimizer1 = None
@@ -181,6 +182,19 @@ class Smoe:
 
         init_new_vars_op = tf.global_variables_initializer()
         self.session.run(init_new_vars_op)
+
+    def checkpoint(self, path):
+        if self.save_op is None:
+            self.save_op = tf.train.Saver()
+        save_path = self.save_op.save(self.session, path)
+        print("Model saved in file: %s" % save_path)
+
+    def restore(self, path):
+        if self.save_op is None:
+            self.save_op = tf.train.Saver()
+
+        self.save_op.restore(self.session, path)
+        print("Model restored from file: %s" % path)
 
     def set_optimizer(self, optimizer1, optimizer2=None, optimizer3=None, grad_clip_value_abs=None):
         self.optimizer1 = optimizer1
