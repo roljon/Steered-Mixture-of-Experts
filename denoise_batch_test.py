@@ -21,8 +21,7 @@ from utils import save_model, load_params
 
 #mat_paths = ["tok1_bm3d_sigma10.mat", "tok1_bm3d_sigma25.mat", "peppers128_bm3d_sigma25.mat",
 #             "peppers128_bm3d_sigma10.mat"]
-mat_paths = ["tok1_bm3d_sigma25.mat", "peppers128_bm3d_sigma25.mat",
-             "peppers128_bm3d_sigma10.mat"]
+mat_paths = ["peppers128_bm3d_sigma10.mat"]
 
 base_lrs = [0.01, 0.001, 0.0001, 0.00001]
 base_lr_divs = [1., 10., 50., 100]

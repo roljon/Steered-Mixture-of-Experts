@@ -38,22 +38,23 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
 
     optimizer1 = tf.train.AdamOptimizer(base_lr)
     optimizer2 = tf.train.AdamOptimizer(base_lr / 100.)
+    optimizer3 = tf.train.AdamOptimizer(base_lr*1000)
 
-    smoe.train(iterations, val_iter=validation_iterations, optimizer1=optimizer1, optimizer2=optimizer2,
+    smoe.train(iterations, val_iter=validation_iterations, optimizer1=optimizer1, optimizer2=optimizer2, optimizer3=optimizer3,
                callbacks=[loss_plotter.plot, image_plotter.plot, logger.log])
 
     #restart = True
-    num = 50
-    start_reg = 0.
-    end_reg = 3.
+    num = 100
+    start_reg = 1.
+    end_reg = 100.
     regs = np.linspace(start_reg, end_reg, num)
-
+    iterations = 100
     #regs = np.flipud(0.03/np.linspace(1, 30000, 200))
 
     for reg in list(regs):
         out_path = results_path + '/{0:.8f}'.format(float(reg))
         loss_plotter = LossPlotter(path=out_path + "/loss.png", quiet=True)
-        image_plotter = ImagePlotter(path=out_path, options=['orig', 'reconstruction', 'pis_hist'],
+        image_plotter = ImagePlotter(path=out_path, options=['orig', 'reconstruction', 'gating', 'pis_hist'],
                                      quiet=True)
 
         if restart:
@@ -61,9 +62,10 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
             tf.reset_default_graph()
             optimizer1 = tf.train.AdamOptimizer(base_lr)
             optimizer2 = tf.train.AdamOptimizer(base_lr / 100.)
+            optimizer3 = tf.train.AdamOptimizer(base_lr * 1000)
             smoe = Smoe(orig, kernels_per_dim, init_params=init_params, pis_relu=True, train_pis=True,
                         start_batches=batches)
-            smoe.train(iterations, val_iter=validation_iterations, optimizer1=optimizer1, optimizer2=optimizer2,
+            smoe.train(iterations, val_iter=validation_iterations, optimizer1=optimizer1, optimizer2=optimizer2, optimizer3=optimizer3,
                        pis_l1=reg, callbacks=[loss_plotter.plot, image_plotter.plot])
         else:
             print("continue with reg {0:.8f}".format(reg))

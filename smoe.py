@@ -2,7 +2,7 @@ import numpy as np
 import math
 import tensorflow as tf
 from tensorflow.python.client import timeline
-
+from tensorflow.python.ops.special_math_ops import _exponential_space_einsum as einsum
 
 class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, sqrt_pis=False, pis_relu=False,
@@ -36,7 +36,6 @@ class Smoe:
         self.loss_op = None
         self.train_op = None
         self.checkpoint_best_op = None
-        self.gradients = None
         self.mse_op = None
         self.target_op = None
         self.domain_op = None
@@ -52,6 +51,7 @@ class Smoe:
         # optimizers
         self.optimizer1 = None
         self.optimizer2 = None
+        self.optimizer3 = None
 
         # others
         # TODO refactor to logger class
@@ -144,8 +144,8 @@ class Smoe:
         else:
             self.pis_var = tf.constant(pis_init, dtype=tf.float32)
 
-        pis = self.pis_var
-
+        pis = tf.nn.relu(self.pis_var)
+        #pis = tf.where(tf.is_nan(pis), tf.zeros_like(pis), pis)
         if pis_relu:
             pis = tf.nn.relu(pis)
 
@@ -155,6 +155,9 @@ class Smoe:
         musX = tf.expand_dims(self.musX_var, axis=1)
 
         pis_mask = pis > 0
+        # pis = tf.where(pis_mask, self.pis_var, tf.zeros_like(self.pis_var))
+        # pis /= tf.reduce_sum(pis)
+        # assign_op = self.pis_var.assign(pis)
 
         # filter out all vars for pi <= 0
         # TODO this should be an option
@@ -164,6 +167,7 @@ class Smoe:
         gamma_e = tf.boolean_mask(self.gamma_e_var, pis_mask)
         U = tf.boolean_mask(U, pis_mask)
         pis = tf.boolean_mask(pis, pis_mask)
+        #pis = tf.Print(pis, [tf.reduce_sum(pis), tf.reduce_sum(self.pis_var)])
         """
         nu_e = self.nu_e_var
         gamma_e = self.gamma_e_var
@@ -179,18 +183,21 @@ class Smoe:
 
         x_sub_mu = tf.expand_dims(domain_exp - musX, axis=-1)
         # TODO rename U to A
-        n_exp = tf.exp(-1 / 2 * tf.einsum('abli,alm,aml,abmj->ab', x_sub_mu, U, U, x_sub_mu))
+        n_exp = tf.exp(-0.5 * einsum('abli,alm,anm,abnj->ab', x_sub_mu, U, U, x_sub_mu))
 
         N = tf.tile(tf.expand_dims(n_quo, axis=1), (1, tf.shape(n_exp)[1])) * n_exp
 
         n_w = N * tf.expand_dims(pis, axis=-1)
         n_w_norm = tf.reduce_sum(n_w, axis=0)
+        n_w_norm = tf.maximum(10e-12, n_w_norm)
 
         self.w_e_op = n_w / n_w_norm
         self.w_e_max_op = tf.argmax(self.w_e_op, axis=0)
 
         self.res = tf.reduce_sum(self.w_e_op * (tf.matmul(gamma_e, tf.transpose(self.domain_op)) + tf.expand_dims(nu_e, axis=-1)), axis=0)
-
+        self.res = tf.minimum(tf.maximum(self.res, 0), 1)
+        # self.res = tf.Print(self.res, [tf.reduce_max(self.res1), tf.reduce_min(self.res1)], "p")
+        # self.res = tf.Print(self.res, [tf.reduce_max(self.res), tf.reduce_min(self.res)], "a")
 
         # checkpoint op
         self.pis_best_var = tf.Variable(self.pis_var)
@@ -211,12 +218,12 @@ class Smoe:
 
         self.pis_l1 = tf.placeholder(tf.float32)
         self.u_l1 = tf.placeholder(tf.float32)
-        pis_l1 = self.pis_l1 * tf.reduce_sum(pis) * (tf.cast(self.num_pi_op, tf.float32) / self.start_pis)
+        pis_l1 = self.pis_l1 * tf.reduce_sum(pis) / self.start_pis
 
         # TODO work in progess
         rxx_det = 1/tf.reduce_prod(tf.matrix_diag_part(U), axis=-1)**2
-        u_l1 = self.u_l1 * tf.reduce_sum(1/rxx_det) * (tf.cast(self.num_pi_op, tf.float32) / self.start_pis)
-        #u_l1 = self.u_l1 * tf.reduce_sum(U) * (tf.cast(self.num_pi_op, tf.float32) / self.start_pis)
+        u_l1 = self.u_l1 * tf.reduce_sum(1/rxx_det) #/ self.start_pis # * (tf.cast(self.num_pi_op, tf.float32) / self.start_pis)
+        #u_l1 = self.u_l1 * tf.reduce_sum(tf.matrix_diag_part(U)) # * (tf.cast(self.num_pi_op, tf.float32) / self.start_pis)
         #'''
 
         self.loss_op = mse + pis_l1 + u_l1
@@ -226,102 +233,99 @@ class Smoe:
         init_new_vars_op = tf.global_variables_initializer()
         self.session.run(init_new_vars_op)
 
-    def set_optimizer(self, optimizer1, optimizer2=None, grad_clip_value_abs=None):
+    def set_optimizer(self, optimizer1, optimizer2=None, optimizer3=None, grad_clip_value_abs=None):
         self.optimizer1 = optimizer1
-        if optimizer2 is not None:
+
+        if optimizer2 is None:
+            self.optimizer2 = optimizer1
+        else:
             self.optimizer2 = optimizer2
 
-        var_opt1 = [self.nu_e_var, self.gamma_e_var, self.musX_var, self.U_var]
+        if optimizer3 is None:
+            self.optimizer3 = optimizer1
+        else:
+            self.optimizer3 = optimizer3
+
+        #self.train_op = self.optimizer1.minimize(self.loss_op)
+        #return
+
+        var_opt1 = [self.nu_e_var, self.gamma_e_var, self.musX_var]
         var_opt2 = [self.pis_var]
+        var_opt3 = [self.U_var]
 
         # sort out not trainable vars
         var_opt1 = [var for var in var_opt1 if var in tf.trainable_variables()]
         var_opt2 = [var for var in var_opt2 if var in tf.trainable_variables()]
+        var_opt3 = [var for var in var_opt3 if var in tf.trainable_variables()]
 
         accum_gradients = [tf.Variable(tf.zeros_like(var.initialized_value()), trainable=False)
-                           for var in var_opt1 + var_opt2]
+                           for var in var_opt1 + var_opt2 + var_opt3]
         self.zero_op = [grad.assign(tf.zeros_like(grad)) for grad in accum_gradients]
-        self.gradients = tf.gradients(self.loss_op, var_opt1 + var_opt2)
-        self.accum_ops = [accum_gradients[i].assign_add(gv) for i, gv in enumerate(self.gradients)]
+        gradients = tf.gradients(self.loss_op, var_opt1 + var_opt2 + var_opt3)
+        self.accum_ops = [accum_gradients[i].assign_add(gv) for i, gv in enumerate(gradients)]
 
         if grad_clip_value_abs is not None:
-            # gradients, _ = tf.clip_by_global_norm(gradients, 1)
-            # print(type(gradients), gradients)
-            self.gradients = [tf.clip_by_value(g, -grad_clip_value_abs, grad_clip_value_abs) for g in self.gradients]
-            #accum_gradients = [tf.clip_by_value(g, -grad_clip_value_abs, grad_clip_value_abs) for g in accum_gradients]
-            #accum_gradients, _ = tf.clip_by_global_norm(accum_gradients, 0.1)
-            # self.gradients = [tf.clip_by_norm(g, grad_clip_value_abs) for g in self.gradients]
-        #accum_gradients, _ = tf.clip_by_global_norm(accum_gradients, 0.1)
+            accum_gradients = [tf.clip_by_value(g, -grad_clip_value_abs, grad_clip_value_abs) for g in accum_gradients]
 
-        if self.optimizer2 is None or len(var_opt2) == 0:
-            # self.train_op = self.optimizer1.apply_gradients(zip(self.gradients, var_opt1 + var_opt2))
-            self.train_op = self.optimizer1.apply_gradients(zip(accum_gradients, var_opt1 + var_opt2))
 
-        else:
-            # gradients1 = self.gradients[:len(var_opt1)]
-            # gradients2 = self.gradients[len(var_opt1):]
-            gradients1 = accum_gradients[:len(var_opt1)]
-            gradients2 = accum_gradients[len(var_opt1):]
-            #gradients1 = [tf.clip_by_value(g, -grad_clip_value_abs, grad_clip_value_abs) for g in gradients1]
-            #gradients2 = [tf.clip_by_value(g, -grad_clip_value_abs, grad_clip_value_abs) for g in gradients2]
+        # TODO work in progess
+        """
+        # for  grad in gradients1:
+        #    print (grad.shape)
+        pis_relu = tf.nn.relu(tf.stop_gradient(self.pis_var))
+        #pis_norm = pis_relu / tf.reduce_sum(pis_relu)
+        # pis_norm = tf.expand_dims(pis_norm, axis=1)
+        pis_norm = pis_relu / tf.cast(tf.count_nonzero(pis_relu), tf.float32)
+        pis_norm = pis_norm#**2
+        #pis_norm = tf.Print(pis_norm, [tf.reduce_min(pis_norm), tf.reduce_max(pis_norm)], "minmax")
+        #pis_norm = tf.maximum(10e-8, pis_norm)
 
-            """
-            accum_gradients1 = [tf.Variable(tf.zeros_like(var.initialized_value()), trainable=False)
-                               for var in var_opt1]
-            zero_op1 = [grad.assign(tf.zeros_like(grad)) for grad in accum_gradients1]
-            gradients1 = self.optimizer1.compute_gradients(self.loss_op, var_opt1)
-            accum_ops1 = [accum_gradients1[i].assign_add(gv[0]) for i, gv in enumerate(gradients1)]
+        pis_norm1 = tf.expand_dims(pis_norm, axis=-1)
+        pis_norm2 = tf.expand_dims(pis_norm1, axis=-1)
+        new_grads = []
+        for grad in accum_gradients:
+            if len(grad.shape) == 1:
+                grad /= pis_norm
+            elif len(grad.shape) == 2:
+                grad /= pis_norm1
+            elif len(grad.shape) == 3:
+                grad /= pis_norm2
+            else:
+                raise ValueError
+            new_grads.append(grad)
+        accum_gradients = new_grads
 
-            accum_gradients2 = [tf.Variable(tf.zeros_like(var.initialized_value()), trainable=False)
-                                for var in var_opt2]
-            zero_op2 = [grad.assign(tf.zeros_like(grad)) for grad in accum_gradients2]
-            gradients2 = self.optimizer1.compute_gradients(self.loss_op, var_opt2)
-            accum_ops2 = [accum_gradients2[i].assign_add(gv[0]) for i, gv in enumerate(gradients2)]
+        # gradients1 = [grad / pis_norm if len(grad.shape) == 2 else grad / tf.expand_dims(pis_norm, axis=-1) for grad
+        #              in gradients1]
+        # """
+        gradients1 = accum_gradients[:len(var_opt1)]
+        gradients2 = accum_gradients[len(var_opt1):len(var_opt1) + len(var_opt2)]
+        gradients3 = accum_gradients[len(var_opt1) + len(var_opt2):]
 
-            self.zero_op = tf.group(*(zero_op1+zero_op2))
-            self.accum_ops = tf.group(*(accum_ops1+accum_ops2))
-            #"""
+        train_op1 = self.optimizer1.apply_gradients(zip(gradients1, var_opt1))
+        train_op2 = self.optimizer2.apply_gradients(zip(gradients2, var_opt2))
+        train_op3 = self.optimizer3.apply_gradients(zip(gradients3, var_opt3))
+        self.train_op = tf.group(train_op1, train_op2, train_op3)
 
-            # TODO work in progess
-            """
-            # for  grad in gradients1:
-            #    print (grad.shape)
-            pis_relu = tf.nn.relu(self.pis_var)
-            #pis_norm = pis_relu / tf.reduce_sum(pis_relu)
-            # pis_norm = tf.expand_dims(pis_norm, axis=1)
-            pis_norm = pis_relu / tf.cast(self.num_pi_op, tf.float32)
-            #pis_norm = tf.maximum(10e-8, pis_norm)
+        # normalize pis to 1
+        # with tf.control_dependencies([train_op]):
+        # #pis_mask = self.pis_var > 0
+        # #pis = tf.where(pis_mask, self.pis_var, tf.zeros_like(self.pis_var))
+        #     pis = tf.nn.relu(tf.stop_gradient(self.pis_var))
+        #     pis = tf.where(tf.is_nan(pis), tf.zeros_like(pis), pis)
+        #     pis /= tf.reduce_sum(pis)
+        #     pis = tf.where(tf.is_nan(pis), tf.zeros_like(pis), pis)
+        #     assign_op = self.pis_var.assign(pis)
+        #     # assign_op = tf.Print(assign_op, [tf.reduce_max(pis)])
 
-            pis_norm1 = tf.expand_dims(pis_norm, axis=-1)
-            pis_norm2 = tf.expand_dims(pis_norm1, axis=-1)
-            new_grads = []
-            for grad in gradients1:
-                if len(grad.shape) == 1:
-                    grad /= pis_norm
-                elif len(grad.shape) == 2:
-                    grad /= pis_norm1
-                elif len(grad.shape) == 3:
-                    grad /= pis_norm2
-                else:
-                    raise ValueError
-                new_grads.append(grad)
-            gradients1 = new_grads
+        #self.train_op = train_op #tf.group(assign_op, self.train_op)
 
-            # gradients1 = [grad / pis_norm if len(grad.shape) == 2 else grad / tf.expand_dims(pis_norm, axis=-1) for grad
-            #              in gradients1]
-            # """
-            train_op1 = self.optimizer1.apply_gradients(zip(gradients1, var_opt1))
-            train_op2 = self.optimizer2.apply_gradients(zip(gradients2, var_opt2))
-            self.train_op = tf.group(train_op1, train_op2)
-
-            # normalize pis to 1
-            with tf.control_dependencies([self.train_op]):
-                pis_mask = self.pis_var > 0
-                pis = tf.where(pis_mask, self.pis_var, tf.zeros_like(self.pis_var))
-                pis /= tf.reduce_sum(pis)
-                assign_op = self.pis_var.assign(pis)
-
-            self.train_op = assign_op #tf.group(assign_op, self.train_op)
+        #pis = tf.nn.relu(tf.stop_gradient(self.pis_var))
+        #pis = tf.where(tf.is_nan(pis), tf.zeros_like(pis), pis)
+        #pis /= tf.reduce_sum(pis)
+        #pis = tf.where(tf.is_nan(pis), tf.zeros_like(pis), pis)
+        #self.assign_op = self.pis_var.assign(pis)
+        #self.assign_op = tf.Print(assign_op, [tf.reduce_sum(self.pis_var)])
 
         uninitialized_vars = []
         for var in tf.global_variables():
@@ -334,10 +338,10 @@ class Smoe:
         init_new_vars_op = tf.variables_initializer(uninitialized_vars)
         self.session.run(init_new_vars_op)
 
-    def train(self, num_iter, val_iter=100, optimizer1=None, optimizer2=None, grad_clip_value_abs=None, pis_l1=0,
+    def train(self, num_iter, val_iter=100, optimizer1=None, optimizer2=None, optimizer3=None, grad_clip_value_abs=None, pis_l1=0,
               u_l1=0, callbacks=()):
         if optimizer1:
-            self.set_optimizer(optimizer1, optimizer2, grad_clip_value_abs=grad_clip_value_abs)
+            self.set_optimizer(optimizer1, optimizer2, optimizer3, grad_clip_value_abs=grad_clip_value_abs)
         assert self.optimizer1 is not None, "no optimizer found, you have to specify one!"
 
         """
@@ -378,10 +382,10 @@ class Smoe:
 
                 # TODO this should be refactored into samples_per_batch or removed
                 # only recalculate batches if no minibatch training is enabled
-                # if self.mini_idxs is None:
-                #    self.batches = math.ceil(self.start_batches * (num_pi / self.start_pis))
-                #    # print("{0} -> {1} batches".format(self.start_batches, self.batches))
-                #    self.intervals = self.calc_intervals(self.image_flat.size, self.batches)
+                if self.mini_idxs is None:
+                   self.batches = math.ceil(self.start_batches * (num_pi / self.start_pis))
+                   # print("{0} -> {1} batches".format(self.start_batches, self.batches))
+                   self.intervals = self.calc_intervals(self.image_flat.size, self.batches)
 
                 loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=True,
                                                              update_reconstruction=validate)
@@ -563,6 +567,7 @@ class Smoe:
 
         if train:
             self.session.run(self.train_op)
+            #self.session.run(self.assign_op)
 
         return loss_val, mse_val, num_pi
 
@@ -642,7 +647,7 @@ class Smoe:
             for col in range(kernels_per_dim):
                 sig_1 = 1 / (2 * (kernels_per_dim + 1))
                 sig_2 = 1 / (2 * (kernels_per_dim + 1))
-                roh = 0 #np.random.uniform(-0.1, 0.1)
+                roh = 0. #np.random.uniform(-0.1, 0.1)
 
                 RsXX[row * kernels_per_dim + col] = np.array([[sig_1 * sig_1, roh * sig_1 * sig_2],
                                                               [roh * sig_1 * sig_2, sig_2 * sig_2]])
