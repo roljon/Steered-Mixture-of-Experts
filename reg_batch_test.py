@@ -34,11 +34,15 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
     image_plotter = ImagePlotter(path=results_path, options=['orig', 'reconstruction', 'gating', 'pis_hist'], quiet=True)
     logger = ModelLogger(path=results_path)
 
-    smoe = Smoe(orig, kernels_per_dim, init_params=init_params, pis_relu=True, train_pis=True, start_batches=batches)
+    smoe = Smoe(orig, kernels_per_dim, init_params=init_params, train_pis=True, start_batches=batches)
 
-    optimizer1 = tf.train.AdamOptimizer(base_lr)
-    optimizer2 = tf.train.AdamOptimizer(base_lr / 100.)
-    optimizer3 = tf.train.AdamOptimizer(base_lr*1000)
+    lr1 = base_lr
+    lr2 = base_lr / 10.
+    lr3 = base_lr * 1000.
+
+    optimizer1 = tf.train.AdamOptimizer(lr1)
+    optimizer2 = tf.train.AdamOptimizer(lr2)
+    optimizer3 = tf.train.AdamOptimizer(lr3)
 
     smoe.train(iterations, val_iter=validation_iterations, optimizer1=optimizer1, optimizer2=optimizer2, optimizer3=optimizer3,
                callbacks=[loss_plotter.plot, image_plotter.plot, logger.log])
@@ -60,11 +64,12 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
         if restart:
             del smoe
             tf.reset_default_graph()
-            optimizer1 = tf.train.AdamOptimizer(base_lr)
-            optimizer2 = tf.train.AdamOptimizer(base_lr / 100.)
-            optimizer3 = tf.train.AdamOptimizer(base_lr * 1000)
-            smoe = Smoe(orig, kernels_per_dim, init_params=init_params, pis_relu=True, train_pis=True,
-                        start_batches=batches)
+
+            optimizer1 = tf.train.AdamOptimizer(lr1)
+            optimizer2 = tf.train.AdamOptimizer(lr2)
+            optimizer3 = tf.train.AdamOptimizer(lr3)
+
+            smoe = Smoe(orig, kernels_per_dim, init_params=init_params, train_pis=True, start_batches=batches)
             smoe.train(iterations, val_iter=validation_iterations, optimizer1=optimizer1, optimizer2=optimizer2, optimizer3=optimizer3,
                        pis_l1=reg, callbacks=[loss_plotter.plot, image_plotter.plot])
         else:

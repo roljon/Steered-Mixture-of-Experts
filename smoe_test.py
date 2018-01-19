@@ -35,14 +35,12 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
     image_plotter = ImagePlotter(path=results_path, options=['orig', 'reconstruction', 'gating', 'pis_hist'], quiet=True)
     logger = ModelLogger(path=results_path)
 
-    smoe = Smoe(orig, kernels_per_dim, init_params=init_params, pis_relu=True, train_pis=True, start_batches=batches)
-
+    smoe = Smoe(orig, kernels_per_dim, init_params=init_params, train_pis=True, start_batches=batches)
 
     optimizer1 = tf.train.AdamOptimizer(base_lr)
     optimizer2 = tf.train.AdamOptimizer(base_lr/10)
     optimizer3 = tf.train.AdamOptimizer(base_lr*1000)
-    #optimizer1 = tf.train.GradientDescentOptimizer(base_lr)
-    #optimizer2 = tf.train.GradientDescentOptimizer(base_lr)
+
     smoe.train(iterations, val_iter=validation_iterations, optimizer1=optimizer1, optimizer2=optimizer2, optimizer3=optimizer3,
                pis_l1=l1reg, callbacks=[loss_plotter.plot, image_plotter.plot, logger.log]) #grad_clip_value_abs=0.01
 
