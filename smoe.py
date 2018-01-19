@@ -4,7 +4,7 @@ import tensorflow as tf
 from tensorflow.python.ops.special_math_ops import _exponential_space_einsum as einsum
 
 class Smoe:
-    def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1, minibatch_trainig=False):
+    def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1):
         self.domain = None
 
         # init params
@@ -44,7 +44,6 @@ class Smoe:
         self.start = None
         self.end = None
         self.num_pi_op = None
-        self.mini_idxs = None
 
         # optimizers
         self.optimizer1 = None
@@ -95,10 +94,9 @@ class Smoe:
         # self.session = tf.Session()
 
         self.init_model(self.domain, self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init,
-                        train_pis, minibatch_trainig)
+                        train_pis)
 
-    def init_model(self, domain_init, nu_e_init, gamma_e_init, pis_init, musX_init, A_init, train_pis=True,
-                   minibatch_trainig=False):
+    def init_model(self, domain_init, nu_e_init, gamma_e_init, pis_init, musX_init, A_init, train_pis=True):
 
         self.nu_e_var = tf.Variable(nu_e_init, dtype=tf.float32)
         self.gamma_e_var = tf.Variable(gamma_e_init, dtype=tf.float32)
@@ -112,15 +110,10 @@ class Smoe:
         self.target_op = tf.constant(self.image_flat, dtype=tf.float32)
         self.domain_op = tf.constant(domain_init, dtype=tf.float32)
 
-        if not minibatch_trainig:
-            self.start = tf.placeholder(dtype=tf.int32)
-            self.end = tf.placeholder(dtype=tf.int32)
-            self.target_op = self.target_op[self.start:self.end]
-            self.domain_op = self.domain_op[self.start:self.end]
-        else:
-            self.mini_idxs = tf.placeholder(shape=[None], dtype=tf.int32)
-            self.target_op = tf.gather(self.target_op, self.mini_idxs)
-            self.domain_op = tf.gather(self.domain_op, self.mini_idxs)       
+        self.start = tf.placeholder(dtype=tf.int32)
+        self.end = tf.placeholder(dtype=tf.int32)
+        self.target_op = self.target_op[self.start:self.end]
+        self.domain_op = self.domain_op[self.start:self.end]
 
         musX = tf.expand_dims(self.musX_var, axis=1)
 
@@ -229,7 +222,6 @@ class Smoe:
         train_op3 = self.optimizer3.apply_gradients(zip(gradients3, var_opt3))
         self.train_op = tf.group(train_op1, train_op2, train_op3)
 
-
         uninitialized_vars = []
         for var in tf.global_variables():
             try:
@@ -267,11 +259,9 @@ class Smoe:
                 validate = i % val_iter == 0
 
                 # TODO this should be refactored into samples_per_batch or removed
-                # only recalculate batches if no minibatch training is enabled
-                if self.mini_idxs is None:
-                   self.batches = math.ceil(self.start_batches * (num_pi / self.start_pis))
-                   # print("{0} -> {1} batches".format(self.start_batches, self.batches))
-                   self.intervals = self.calc_intervals(self.image_flat.size, self.batches)
+                self.batches = math.ceil(self.start_batches * (num_pi / self.start_pis))
+                # print("{0} -> {1} batches".format(self.start_batches, self.batches))
+                self.intervals = self.calc_intervals(self.image_flat.size, self.batches)
 
                 loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=True,
                                                              update_reconstruction=validate)
@@ -312,36 +302,8 @@ class Smoe:
         print("end loss/mse: ", loss_val, "/", mse_val, "@iter: ", i)
         print("best loss/mse: ", self.best_loss, "/", self.best_mse)
 
-    def run_minibatched(self, pis_l1=0, u_l1=0):
-
-        idxs = np.arange(self.image_flat.size)
-        np.random.shuffle(idxs)
-
-        loss_val, mse_val, num_pis = 0, 0, 0
-
-        for start, end in self.intervals:
-            mini_idxs = idxs[start:end]
-            self.session.run(self.zero_op)
-            loss, mse, num_pi, _ = self.session.run([self.loss_op, self.mse_op, self.num_pi_op, self.accum_ops],
-                                       feed_dict={self.mini_idxs: mini_idxs,
-                                                  self.pis_l1: pis_l1,
-                                                  self.u_l1: u_l1})
-            self.session.run(self.train_op)
-
-            loss_val += loss * (end - start) / self.image_flat.size
-            mse_val += mse * (end - start) / self.image_flat.size
-            num_pis = num_pi * (end - start) / self.image_flat.size
-
-        return loss_val, mse_val, num_pis
-
-
-
     def run_batched(self, pis_l1=0, u_l1=0, train=True, update_reconstruction=False):
         self.valid = False
-
-        # TODO just for testing
-        if self.mini_idxs is not None and train is True:
-            return self.run_minibatched(pis_l1=pis_l1, u_l1=u_l1)
 
         self.session.run(self.zero_op)
 
@@ -357,21 +319,11 @@ class Smoe:
             if update_reconstruction:
                 retrieve += [self.res, self.w_e_max_op]
 
-            if self.mini_idxs is not None:
-                if 'done' in locals():
-                    break
-                results = self.session.run(retrieve,
-                                           feed_dict={self.mini_idxs: np.arange(self.image_flat.size),
-                                                      self.pis_l1: pis_l1,
-                                                      self.u_l1: u_l1})
-                done = True
-
-            else:
-                results = self.session.run(retrieve,
-                                           feed_dict={self.start: start,
-                                                      self.end: end,
-                                                      self.pis_l1: pis_l1,
-                                                      self.u_l1: u_l1})
+            results = self.session.run(retrieve,
+                                       feed_dict={self.start: start,
+                                                  self.end: end,
+                                                  self.pis_l1: pis_l1,
+                                                  self.u_l1: u_l1})
 
             if update_reconstruction:
                 reconstructions.append(results[4])
