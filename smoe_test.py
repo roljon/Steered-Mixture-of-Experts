@@ -47,24 +47,24 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
         smoe.restore(checkpoint_path)
 
     smoe.train(iterations, val_iter=validation_iterations, pis_l1=l1reg,
-               callbacks=[loss_plotter.plot, image_plotter.plot, logger.log]) #grad_clip_value_abs=0.01
+               callbacks=[loss_plotter.plot, image_plotter.plot, logger.log])
 
     save_model(smoe, results_path + "/params_best.pkl", best=True)
     save_model(smoe, results_path + "/params_last.pkl", best=False)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('-i', '--image', type=str, required=True, help="input image")
-    parser.add_argument('-r', '--results', type=str, required=True, help="results path")
+    parser.add_argument('-i', '--image_path', type=str, required=True, help="input image")
+    parser.add_argument('-r', '--results_path', type=str, required=True, help="results path")
     parser.add_argument('-n', '--iterations', type=int, default=10000, help="number of iterations")
     parser.add_argument('-v', '--validation_iterations', type=int, default=100, help="number of iterations between validations")
-    parser.add_argument('-k', '--kernels', type=int, default=12, help="number of kernels per dimension")
-    parser.add_argument('-p', '--params', type=str, default=None, help="parameter file for model initialization")
+    parser.add_argument('-k', '--kernels_per_dim', type=int, default=12, help="number of kernels per dimension")
+    parser.add_argument('-p', '--params_file', type=str, default=None, help="parameter file for model initialization")
     parser.add_argument('-reg', '--l1reg', type=float, default=0, help="l1 regularization for pis")
-    parser.add_argument('-lr', '--learningrate', type=float, default=0.001, help="base learning rate")
+    parser.add_argument('-lr', '--base_lr', type=float, default=0.001, help="base learning rate")
     parser.add_argument('-b', '--batches', type=int, default=1, help="number of batches to split the training into (will be automaticly reduced when number of pis drops")
     parser.add_argument('-c', '--checkpoint_path', type=str, default=None, help="path to a checkpoint file to continue the training. EXPERIMENTAL.")
+
     args = parser.parse_args()
 
-    main(args.image, args.results, args.iterations, args.validation_iterations, args.kernels, args.params, args.l1reg, args.learningrate,
-         args.batches, args.checkpoint_path)
+    main(**vars(args))
