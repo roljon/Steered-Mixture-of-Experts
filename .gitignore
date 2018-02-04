@@ -106,3 +106,10 @@ venv.bak/
 *.pkl
 *.zip
 .idea/
+*.json
+*.pbtext
+*tar.gz
+*.mat
+*.png
+*.pgm
+*.pdf
