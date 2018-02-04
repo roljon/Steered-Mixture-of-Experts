@@ -19,7 +19,7 @@ class ModelLogger:
         if not os.path.exists(self.checkpoints_path):
             os.mkdir(self.checkpoints_path)
 
-    def log(self, smoe):
+    def log(self, smoe, checkpoint_iter=100):
         iter_ = smoe.get_iter()
         reconstruction = smoe.get_reconstruction()
 
@@ -27,4 +27,5 @@ class ModelLogger:
 
         np.save(self.reconstruction_path + "/{0:08d}_reconstruction.npy".format(iter_), reconstruction)
 
-        smoe.checkpoint(self.checkpoints_path + "/{0:08d}_model.ckpt".format(iter_))
+        if iter_ % checkpoint_iter == 0:
+            smoe.checkpoint(self.checkpoints_path + "/{0:08d}_model.ckpt".format(iter_))

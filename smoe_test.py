@@ -15,7 +15,8 @@ from logger import ModelLogger
 from utils import save_model, load_params
 
 
-def main(image_path, results_path, iterations, validation_iterations, kernels_per_dim, params_file, l1reg, base_lr, batches, checkpoint_path):
+def main(image_path, results_path, iterations, validation_iterations, kernels_per_dim, params_file, l1reg, base_lr,
+         batches, checkpoint_path, lr_div, lr_mult, disable_train_pis, disable_train_gammas, radial_as):
     orig = plt.imread(image_path)
     if orig.dtype == np.uint8:
         orig = orig.astype(np.float32)/255.
@@ -34,11 +35,12 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
     image_plotter = ImagePlotter(path=results_path, options=['orig', 'reconstruction', 'gating', 'pis_hist'], quiet=True)
     logger = ModelLogger(path=results_path)
 
-    smoe = Smoe(orig, kernels_per_dim, init_params=init_params, train_pis=True, start_batches=batches)
+    smoe = Smoe(orig, kernels_per_dim, init_params=init_params, train_pis=not disable_train_pis,
+                train_gammas=not disable_train_gammas, radial_as=radial_as, start_batches=batches)
 
     optimizer1 = tf.train.AdamOptimizer(base_lr)
-    optimizer2 = tf.train.AdamOptimizer(base_lr/10)
-    optimizer3 = tf.train.AdamOptimizer(base_lr*1000)
+    optimizer2 = tf.train.AdamOptimizer(base_lr/lr_div)
+    optimizer3 = tf.train.AdamOptimizer(base_lr*lr_mult)
 
     # optimizers have to be set before the restore
     smoe.set_optimizer(optimizer1, optimizer2, optimizer3)
@@ -64,6 +66,12 @@ if __name__ == '__main__':
     parser.add_argument('-lr', '--base_lr', type=float, default=0.001, help="base learning rate")
     parser.add_argument('-b', '--batches', type=int, default=1, help="number of batches to split the training into (will be automaticly reduced when number of pis drops")
     parser.add_argument('-c', '--checkpoint_path', type=str, default=None, help="path to a checkpoint file to continue the training. EXPERIMENTAL.")
+    parser.add_argument('-d', '--lr_div', type=float, default=100, help="div for pis lr")
+    parser.add_argument('-m', '--lr_mult', type=float, default=1000, help="mult for a lr")
+
+    parser.add_argument('-dp', '--disable_train_pis', type=bool, default=False, help="disable_train_pis")
+    parser.add_argument('-dg', '--disable_train_gammas', type=bool, default=False, help="disable_train_gammas")
+    parser.add_argument('-ra', '--radial_as', type=bool, default=False, help="radial_as")
 
     args = parser.parse_args()
 

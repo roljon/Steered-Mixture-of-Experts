@@ -4,7 +4,7 @@ import tensorflow as tf
 from tensorflow.python.ops.special_math_ops import _exponential_space_einsum as einsum
 
 class Smoe:
-    def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1):
+    def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1, train_gammas=True, radial_as=False):
         self.domain = None
 
         # init params
@@ -95,16 +95,28 @@ class Smoe:
         # self.session = tf.Session()
 
         self.init_model(self.domain, self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init,
-                        train_pis)
+                        train_pis, train_gammas, radial_as)
 
-    def init_model(self, domain_init, nu_e_init, gamma_e_init, pis_init, musX_init, A_init, train_pis=True):
+    def init_model(self, domain_init, nu_e_init, gamma_e_init, pis_init, musX_init, A_init, train_pis=True, train_gammas=True, radial_as=False):
 
         self.nu_e_var = tf.Variable(nu_e_init, dtype=tf.float32)
-        self.gamma_e_var = tf.Variable(gamma_e_init, dtype=tf.float32)
+        self.gamma_e_var = tf.Variable(gamma_e_init, trainable=train_gammas, dtype=tf.float32)
         self.musX_var = tf.Variable(musX_init, dtype=tf.float32)
         self.A_var = tf.Variable(A_init, dtype=tf.float32)
         self.pis_var = tf.Variable(pis_init, trainable=train_pis, dtype=tf.float32)
-        
+
+        # TODO make radial work again, uncomment for pcs scripts
+        if A_init.ndim == 1:
+            radial_as = True
+
+        #if radial_as:
+        #    if A_init.ndim == 1:
+        #        self.A_var = tf.Variable(A_init, dtype=tf.float32)
+        #    else:
+        #        self.A_var = tf.Variable(A_init[:, 0, 0], dtype=tf.float32)
+        #else:
+        #    self.A_var = tf.Variable(A_init, dtype=tf.float32)
+
         # self.target_op = tf.placeholder(shape=[None], dtype=tf.float32)
         # self.domain_op = tf.placeholder(shape=[None, 2], dtype=tf.float32)
 
@@ -116,6 +128,19 @@ class Smoe:
         self.target_op = self.target_op[self.start:self.end]
         self.domain_op = self.domain_op[self.start:self.end]
 
+        # if radial_as:
+        #    A_mask = np.ones_like(A_init)
+        #    A_mask[:, 0, 1] = 0
+        #    A_mask[:, 1, 0] = 0
+        #    A = tf.tile(tf.expand_dims(tf.expand_dims(self.A_var, axis=-1), axis=-1), (1, 2, 2))
+        #    #print(A_mask.shape)
+        #    #print(A.shape)
+        #    A = A * A_mask
+        #    #self.a_test = A
+        # else:
+        #    A = self.A_var
+        A = self.A_var
+
         musX = tf.expand_dims(self.musX_var, axis=1)
 
         pis_mask = self.pis_var > 0
@@ -123,8 +148,9 @@ class Smoe:
         musX = tf.boolean_mask(musX, pis_mask)
         nu_e = tf.boolean_mask(self.nu_e_var, pis_mask)
         gamma_e = tf.boolean_mask(self.gamma_e_var, pis_mask)
-        A = tf.boolean_mask(self.A_var, pis_mask)
+        A = tf.boolean_mask(A, pis_mask)
         pis = tf.boolean_mask(self.pis_var, pis_mask)
+
 
         n_div = tf.reduce_prod(tf.matrix_diag_part(A), axis=-1)
         n_dis = np.sqrt(np.power(2*np.pi, 2))
@@ -171,9 +197,12 @@ class Smoe:
         pis_l1 = self.pis_l1 * tf.reduce_sum(pis) / self.start_pis
 
         # TODO work in progess
-        rxx_det = 1/tf.reduce_prod(tf.matrix_diag_part(A), axis=-1)**2
-        u_l1 = self.u_l1 * tf.reduce_sum(1/rxx_det) #/ self.start_pis # * (tf.cast(self.num_pi_op, tf.float32) / self.start_pis)
-        #u_l1 = self.u_l1 * tf.reduce_sum(tf.matrix_diag_part(U)) # * (tf.cast(self.num_pi_op, tf.float32) / self.start_pis)
+        #rxx_det = 1/tf.reduce_prod(tf.matrix_diag_part(A), axis=-1)**2
+        #u_l1 = self.u_l1 * tf.reduce_sum(tf.reduce_prod(tf.matrix_diag_part(A), axis=-1)**2)
+        #u_l1 = self.u_l1 * tf.reduce_sum(tf.matrix_diag_part(A) ** 2)
+        #u_l1 = self.u_l1 * tf.reduce_sum(rxx_det) #/ self.start_pis # * (tf.cast(self.num_pi_op, tf.float32) / self.start_pis)
+        #u_l1 = self.u_l1 * tf.reduce_sum(tf.pow(tf.matrix_diag_part(A)-40, 2))
+        u_l1 = self.u_l1 * tf.reduce_sum(tf.matrix_diag_part(A)) # * (tf.cast(self.num_pi_op, tf.float32) / self.start_pis)
         #'''
 
         self.loss_op = mse + pis_l1 + u_l1
@@ -185,13 +214,13 @@ class Smoe:
 
     def checkpoint(self, path):
         if self.save_op is None:
-            self.save_op = tf.train.Saver()
+            self.save_op = tf.train.Saver(max_to_keep=None)
         save_path = self.save_op.save(self.session, path)
         print("Model saved in file: %s" % save_path)
 
     def restore(self, path):
         if self.save_op is None:
-            self.save_op = tf.train.Saver()
+            self.save_op = tf.train.Saver(max_to_keep=None)
 
         self.save_op.restore(self.session, path)
         print("Model restored from file: %s" % path)
@@ -232,7 +261,10 @@ class Smoe:
         gradients3 = accum_gradients[len(var_opt1) + len(var_opt2):]
 
         train_op1 = self.optimizer1.apply_gradients(zip(gradients1, var_opt1))
-        train_op2 = self.optimizer2.apply_gradients(zip(gradients2, var_opt2))
+        if len(var_opt2) > 0:
+            train_op2 = self.optimizer2.apply_gradients(zip(gradients2, var_opt2))
+        else:
+            train_op2 = tf.no_op()
         train_op3 = self.optimizer3.apply_gradients(zip(gradients3, var_opt3))
         self.train_op = tf.group(train_op1, train_op2, train_op3)
 
@@ -319,7 +351,8 @@ class Smoe:
     def run_batched(self, pis_l1=0, u_l1=0, train=True, update_reconstruction=False):
         self.valid = False
 
-        self.session.run(self.zero_op)
+        if train:
+            self.session.run(self.zero_op)
 
         loss_val = 0
         mse_val = 0
@@ -329,7 +362,9 @@ class Smoe:
         w_es = []
 
         for start, end in self.intervals:
-            retrieve = [self.loss_op, self.mse_op, self.num_pi_op, self.accum_ops]
+            retrieve = [self.loss_op, self.mse_op, self.num_pi_op]
+            if train:
+                retrieve.append(self.accum_ops)
             if update_reconstruction:
                 retrieve += [self.res, self.w_e_max_op]
 
@@ -340,8 +375,12 @@ class Smoe:
                                                   self.u_l1: u_l1})
 
             if update_reconstruction:
-                reconstructions.append(results[4])
-                w_es.append(results[5])
+                if train:
+                    reconstructions.append(results[4])
+                    w_es.append(results[5])
+                else:
+                    reconstructions.append(results[3])
+                    w_es.append(results[4])
 
             loss_val += results[0] * (end - start) / self.image_flat.size
             mse_val += results[1] * (end - start) / self.image_flat.size

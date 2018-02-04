@@ -226,7 +226,7 @@ class DenoisePlotter:
         psnr = 10 * np.log10(255 ** 2 / mse)
         ssim = compare_ssim(y_est, self.y, data_range=1)
 
-        self.axes[2].set_title('reference \n mse: '+str(round(mse,2))+' psnr '+str(round(psnr,2))+'\n ssim: '+str(round(ssim,2)))
+        self.axes[2].set_title('reference \n mse: '+str(round(mse,2))+' psnr '+str(round(psnr,2))+'\n ssim: '+str(round(ssim,3)))
         # self.axes[2].set_title('reference \n mse: ' + str(round(mse, 2)) + ' psnr ' + str(round(psnr, 2)))
         self.axes[2].imshow(y_est, cmap='gray', interpolation='None', vmin=0, vmax=1)
 
@@ -237,7 +237,7 @@ class DenoisePlotter:
 
         self.axes[3].set_title(
             'noisy input \n mse: ' + str(round(mse, 2)) + ' psnr ' + str(round(psnr, 2)) + '\n ssim: ' + str(
-                round(ssim, 2)))
+                round(ssim, 3)))
         # self.axes[3].set_title('noisy input \n mse: ' + str(round(mse, 2)) + ' psnr ' + str(round(psnr, 2)))
         self.axes[3].imshow(self.z, cmap='gray', interpolation='None', vmin=0, vmax=1)
 
@@ -254,7 +254,7 @@ class DenoisePlotter:
         ssim = compare_ssim(y_est, self.y, data_range=1)
 
         self.axes[1].clear()
-        self.axes[1].set_title('denoised \n mse: '+str(round(mse,2))+' psnr '+str(round(psnr,2))+'\n ssim: '+str(round(ssim,2)))
+        self.axes[1].set_title('denoised \n mse: '+str(round(mse,2))+' psnr '+str(round(psnr,2))+'\n ssim: '+str(round(ssim,3)))
         # self.axes[1].set_title('reconstruction \n mse: ' + str(round(mse, 2)) + ' psnr ' + str(round(psnr, 2)))
         self.axes[1].imshow(y_est, cmap='gray', interpolation='None', vmin=0, vmax=1)
 
