@@ -68,9 +68,10 @@ class Smoe:
 
         # generate initializations
         self.image = image
+        self.num_pixel = image.shape[0] * image.shape[1]
         self.image_flat = image.flatten()
         self.init_domain()
-        self.intervals = self.calc_intervals(self.image_flat.size, start_batches)
+        self.intervals = self.calc_intervals(self.num_pixel, start_batches)
         self.batches = start_batches
         self.start_batches = start_batches
 
@@ -117,15 +118,14 @@ class Smoe:
         else:
             self.A_var = tf.Variable(A_init, dtype=tf.float32)
 
-        # self.target_op = tf.placeholder(shape=[None], dtype=tf.float32)
-        # self.domain_op = tf.placeholder(shape=[None, 2], dtype=tf.float32)
+        num_channels = gamma_e_init.shape[-1]
 
         self.target_op = tf.constant(self.image_flat, dtype=tf.float32)
         self.domain_op = tf.constant(domain_init, dtype=tf.float32)
 
         self.start = tf.placeholder(dtype=tf.int32)
         self.end = tf.placeholder(dtype=tf.int32)
-        self.target_op = self.target_op[self.start:self.end]
+        self.target_op = self.target_op[self.start*num_channels:self.end*num_channels]
         self.domain_op = self.domain_op[self.start:self.end]
 
         if radial_as:
@@ -153,7 +153,8 @@ class Smoe:
 
 
         n_div = tf.reduce_prod(tf.matrix_diag_part(A), axis=-1)
-        n_dis = np.sqrt(np.power(2*np.pi, 2))
+        p=2 # VIDEO
+        n_dis = np.sqrt(np.power(2*np.pi, p))
         n_quo = n_div / n_dis
 
         # prepare domain
@@ -172,8 +173,15 @@ class Smoe:
         self.w_e_op = n_w / n_w_norm
         self.w_e_max_op = tf.argmax(self.w_e_op, axis=0)
 
-        self.res = tf.reduce_sum(self.w_e_op * (tf.matmul(gamma_e, tf.transpose(self.domain_op)) + tf.expand_dims(nu_e, axis=-1)), axis=0)
+        # TODO reorder nu_e and gamma_e to avoid unnecessary transpositions
+        domain_tiled = tf.expand_dims(tf.transpose(self.domain_op), axis=0)
+        domain_tiled = tf.tile(domain_tiled, (num_channels, 1, 1))
+        sloped_out = tf.matmul(tf.transpose(gamma_e, perm=[2, 0, 1]), domain_tiled)
+        nu_e = tf.expand_dims(tf.transpose(nu_e), axis=-1)
+        self.res = tf.reduce_sum(self.w_e_op * (sloped_out + nu_e), axis=1)
+
         self.res = tf.minimum(tf.maximum(self.res, 0), 1)
+        self.res = tf.transpose(self.res)
 
         # checkpoint op
         self.pis_best_var = tf.Variable(self.pis_var)
@@ -188,7 +196,7 @@ class Smoe:
                                            tf.assign(self.nu_e_best_var, self.nu_e_var))
 
         # mse = tf.reduce_sum(tf.square(self.restoration_op - target)) / tf.size(target, out_type=tf.float32)
-        mse = tf.reduce_sum(tf.square(self.res - self.target_op)) / tf.cast(tf.size(self.target_op), dtype=tf.float32)
+        mse = tf.reduce_sum(tf.square(tf.reshape(self.res, [-1]) - self.target_op)) / tf.cast(tf.size(self.target_op), dtype=tf.float32)
 
         self.num_pi_op = tf.count_nonzero(pis_mask)
 
@@ -308,7 +316,7 @@ class Smoe:
                 # TODO this should be refactored into samples_per_batch or removed
                 self.batches = math.ceil(self.start_batches * (num_pi / self.start_pis))
                 # print("{0} -> {1} batches".format(self.start_batches, self.batches))
-                self.intervals = self.calc_intervals(self.image_flat.size, self.batches)
+                self.intervals = self.calc_intervals(self.num_pixel, self.batches)
 
                 loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=True,
                                                              update_reconstruction=validate)
@@ -383,15 +391,15 @@ class Smoe:
                     reconstructions.append(results[3])
                     w_es.append(results[4])
 
-            loss_val += results[0] * (end - start) / self.image_flat.size
-            mse_val += results[1] * (end - start) / self.image_flat.size
+            loss_val += results[0] * (end - start) / self.num_pixel
+            mse_val += results[1] * (end - start) / self.num_pixel
             num_pi = results[2]
 
         if update_reconstruction:
             reconstruction = np.concatenate(reconstructions)
             w_e = np.concatenate(w_es)
             self.reconstruction_image = reconstruction.reshape(self.image.shape)
-            self.weight_matrix_argmax = w_e.reshape(self.image.shape)
+            self.weight_matrix_argmax = w_e.reshape(self.image.shape[0:2])
             self.valid = True
 
         if train:
@@ -483,25 +491,32 @@ class Smoe:
     def generate_experts(self, with_means=True):
         assert self.musX_init is not None, "need musX to generate experts"
 
-        self.gamma_e_init = np.zeros((self.musX_init.shape[0], 2))
+        if self.image.ndim == 2:
+            num_channels = 1
+        elif self.image.ndim == 3:
+            num_channels = self.image.shape[-1]
+        else:
+            raise ValueError("unsupported shape {}, only 2 or 2 dims are supported".format(self.image.shape))
+
+        self.gamma_e_init = np.zeros((self.musX_init.shape[0], 2, num_channels))
 
         if with_means:
             # assumes that muX_init are in a square grid
             stride = self.musX_init[0, 0]
-            height, width = self.image.shape
-            mean = np.empty((self.musX_init.shape[0],), dtype=np.float32)
+            height, width = self.image.shape[0], self.image.shape[1]
+            mean = np.empty((self.musX_init.shape[0], num_channels), dtype=np.float32)
             for k, (y, x) in enumerate(zip(*self.musX_init.T)):
                 x0 = int(round((x - stride) * width))
                 x1 = int(round((x + stride) * width))
                 y0 = int(round((y - stride) * height))
                 y1 = int(round((y + stride) * height))
                 
-                mean[k] = np.mean(self.image[y0:y1, x0:x1])
+                mean[k] = np.mean(self.image[y0:y1, x0:x1], axis=(0, 1))
         else:
             # choose nu_e to be 0.5 at center of kernel
             mean = 0.5
 
-        self.nu_e_init = mean - np.sum(self.gamma_e_init * self.musX_init, axis=1)
+        self.nu_e_init = mean
 
     def generate_pis(self, grid_size):
         number = grid_size ** 2
@@ -510,7 +525,6 @@ class Smoe:
     @staticmethod
     def gen_domain(in_):
         if type(in_) is np.ndarray:
-            assert len(in_.shape) == 2, "only 2d images supported!"
             assert in_.shape[0] == in_.shape[1], "only quadratic images supported!"
             num_per_dim = in_.shape[0]
         else:
