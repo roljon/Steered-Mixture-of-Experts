@@ -4,7 +4,7 @@ import tensorflow as tf
 from tensorflow.python.ops.special_math_ops import _exponential_space_einsum as einsum
 
 class Smoe:
-    def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1, train_gammas=True, radial_as=False):
+    def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1, train_gammas=True, radial_as=False, iter_offset=0):
         self.domain = None
 
         # init params
@@ -61,7 +61,7 @@ class Smoe:
         self.best_mse = []
         self.num_pis = []
 
-        self.iter = 0
+        self.iter = iter_offset
         self.valid = False
         self.reconstruction_image = None
         self.weight_matrix_argmax = None
@@ -102,20 +102,20 @@ class Smoe:
         self.nu_e_var = tf.Variable(nu_e_init, dtype=tf.float32)
         self.gamma_e_var = tf.Variable(gamma_e_init, trainable=train_gammas, dtype=tf.float32)
         self.musX_var = tf.Variable(musX_init, dtype=tf.float32)
-        self.A_var = tf.Variable(A_init, dtype=tf.float32)
+        #self.A_var = tf.Variable(A_init, dtype=tf.float32)
         self.pis_var = tf.Variable(pis_init, trainable=train_pis, dtype=tf.float32)
 
         # TODO make radial work again, uncomment for pcs scripts
         if A_init.ndim == 1:
             radial_as = True
 
-        #if radial_as:
-        #    if A_init.ndim == 1:
-        #        self.A_var = tf.Variable(A_init, dtype=tf.float32)
-        #    else:
-        #        self.A_var = tf.Variable(A_init[:, 0, 0], dtype=tf.float32)
-        #else:
-        #    self.A_var = tf.Variable(A_init, dtype=tf.float32)
+        if radial_as:
+            if A_init.ndim == 1:
+                self.A_var = tf.Variable(A_init, dtype=tf.float32)
+            else:
+                self.A_var = tf.Variable(A_init[:, 0, 0], dtype=tf.float32)
+        else:
+            self.A_var = tf.Variable(A_init, dtype=tf.float32)
 
         # self.target_op = tf.placeholder(shape=[None], dtype=tf.float32)
         # self.domain_op = tf.placeholder(shape=[None, 2], dtype=tf.float32)
@@ -128,18 +128,18 @@ class Smoe:
         self.target_op = self.target_op[self.start:self.end]
         self.domain_op = self.domain_op[self.start:self.end]
 
-        # if radial_as:
-        #    A_mask = np.ones_like(A_init)
-        #    A_mask[:, 0, 1] = 0
-        #    A_mask[:, 1, 0] = 0
-        #    A = tf.tile(tf.expand_dims(tf.expand_dims(self.A_var, axis=-1), axis=-1), (1, 2, 2))
-        #    #print(A_mask.shape)
-        #    #print(A.shape)
-        #    A = A * A_mask
-        #    #self.a_test = A
-        # else:
-        #    A = self.A_var
-        A = self.A_var
+        if radial_as:
+           A_mask = np.ones(shape=(A_init.shape[0], 2, 2), dtype=np.float32)
+           A_mask[:, 0, 1] = 0
+           A_mask[:, 1, 0] = 0
+           A = tf.tile(tf.expand_dims(tf.expand_dims(self.A_var, axis=-1), axis=-1), (1, 2, 2))
+           #print(A_mask.shape)
+           #print(A.shape)
+           A = A * A_mask
+           #self.a_test = A
+        else:
+           A = self.A_var
+        #A = self.A_var
 
         musX = tf.expand_dims(self.musX_var, axis=1)
 
@@ -285,9 +285,10 @@ class Smoe:
             self.set_optimizer(optimizer1, optimizer2, optimizer3, grad_clip_value_abs=grad_clip_value_abs)
         assert self.optimizer1 is not None, "no optimizer found, you have to specify one!"
 
-        self.losses = []
-        self.mses = []
-        self.num_pis = []
+        # TODO history nutzen oder weg
+        # self.losses = []
+        # self.mses = []
+        # self.num_pis = []
 
         self.best_loss, self.best_mse, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=False,
                                                                  update_reconstruction=True)
@@ -300,7 +301,7 @@ class Smoe:
             callback(self)
 
         for i in range(1, num_iter + 1):
-            self.iter = i
+            self.iter += 1
             try:
                 validate = i % val_iter == 0
 

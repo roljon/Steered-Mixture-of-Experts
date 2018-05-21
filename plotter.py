@@ -19,6 +19,7 @@ class ImagePlotter:
         self.path = path
         self.options = options
         self.quiet = quiet
+        self.fig = None
 
         if self.path is not None:
             if not os.path.exists(path):
@@ -120,13 +121,15 @@ class ImagePlotter:
             self.fig.savefig(self.path + "/" + name, dpi=600)
 
     def __del__(self):
-        plt.close(self.fig)
+        if self.fig is not None:
+            plt.close(self.fig)
 
 
 class LossPlotter:
     def __init__(self, path=None, quiet=False):
         self.path = path
         self.quiet = quiet
+        self.fig = None
 
         self.fig = plt.figure()
         self.ax_loss = self.fig.add_subplot(111)
@@ -193,7 +196,8 @@ class LossPlotter:
             self.fig.canvas.draw()
 
     def __del__(self):
-        plt.close(self.fig)
+        if self.fig is not None:
+            plt.close(self.fig)
 
 
 class DenoisePlotter:
