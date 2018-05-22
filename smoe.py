@@ -524,19 +524,34 @@ class Smoe:
         self.pis_init = np.ones((number,), dtype=np.float32) / number
 
     @staticmethod
-    def gen_domain(in_):
+    def gen_domain(in_, dim_of_input_space=2):
+        num_per_dim = np.zeros((dim_of_input_space,), dtype=np.int32)
         if type(in_) is np.ndarray:
-            assert in_.shape[0] == in_.shape[1], "only quadratic images supported!"
-            num_per_dim = in_.shape[0]
+            for ii in range(dim_of_input_space):
+                num_per_dim[ii] = in_.shape[ii]
         else:
-            num_per_dim = in_
-        domain = np.zeros((num_per_dim ** 2, 2))
+            for ii in range(dim_of_input_space):
+                num_per_dim[ii] = in_
+        domain = np.zeros((np.prod(num_per_dim), dim_of_input_space))
 
-        for row in range(num_per_dim):
-            for col in range(num_per_dim):
-                # equal spacing between domain positions and boarder
-                domain[row * num_per_dim + col, 0] = (1 / num_per_dim) / 2 + row * (1 / num_per_dim)
-                domain[row * num_per_dim + col, 1] = (1 / num_per_dim) / 2 + col * (1 / num_per_dim)
+        # create coordinates for each dimension
+        coord = []
+        for ii in range(dim_of_input_space):
+            # equal spacing between domain positions and boarder
+            coord.append(np.linspace((1 / num_per_dim[ii]) / 2, 1 - (1 / num_per_dim[ii]) / 2, num_per_dim[ii]))
+
+        # determine evaluation string and create grids
+        eval_str = 'np.meshgrid('
+        for ii in range(dim_of_input_space):
+            if ii == 0:
+                eval_str = eval_str + 'coord[0]'
+            else:
+                eval_str = eval_str + ', coord[{0}]'.format(ii)
+        eval_str = eval_str + ')'
+        grids = eval(eval_str)
+
+        for ii in range(dim_of_input_space):
+            domain[:, ii] = np.reshape(grids[ii], np.prod(num_per_dim), 1)
 
         return domain
 
