@@ -540,15 +540,8 @@ class Smoe:
             # equal spacing between domain positions and boarder
             coord.append(np.linspace((1 / num_per_dim[ii]) / 2, 1 - (1 / num_per_dim[ii]) / 2, num_per_dim[ii]))
 
-        # determine evaluation string and create grids
-        eval_str = 'np.meshgrid('
-        for ii in range(dim_of_input_space):
-            if ii == 0:
-                eval_str = eval_str + 'coord[0]'
-            else:
-                eval_str = eval_str + ', coord[{0}]'.format(ii)
-        eval_str = eval_str + ')'
-        grids = eval(eval_str)
+        # create grids
+        grids = np.meshgrid(*coord)
 
         for ii in range(dim_of_input_space):
             domain[:, ii] = np.reshape(grids[ii], np.prod(num_per_dim), 1)
