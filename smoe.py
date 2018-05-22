@@ -125,6 +125,7 @@ class Smoe:
 
         self.start = tf.placeholder(dtype=tf.int32)
         self.end = tf.placeholder(dtype=tf.int32)
+        # assume output channels of target are in the inner dimension
         self.target_op = self.target_op[self.start*num_channels:self.end*num_channels]
         self.domain_op = self.domain_op[self.start:self.end]
 
@@ -153,7 +154,7 @@ class Smoe:
 
 
         n_div = tf.reduce_prod(tf.matrix_diag_part(A), axis=-1)
-        p=2 # VIDEO
+        p = 2 # 2d images, should be inferred from the shape of domain to support video etc.
         n_dis = np.sqrt(np.power(2*np.pi, p))
         n_quo = n_div / n_dis
 
