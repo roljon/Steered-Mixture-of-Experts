@@ -4,7 +4,7 @@ import tensorflow as tf
 from tensorflow.python.ops.special_math_ops import _exponential_space_einsum as einsum
 
 class Smoe:
-    def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1, train_gammas=True, radial_as=False, iter_offset=0):
+    def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1, train_gammas=True, radial_as=False, iter_offset=0, margin=0.5):
         self.domain = None
 
         # init params
@@ -90,6 +90,7 @@ class Smoe:
             self.generate_pis(kernels_per_dim)
 
         self.start_pis = self.pis_init.size
+        self.margin = margin
 
         gpu_options = tf.GPUOptions(allow_growth=True)
         self.session = tf.InteractiveSession(config=tf.ConfigProto(gpu_options=gpu_options))
@@ -197,7 +198,11 @@ class Smoe:
                                            tf.assign(self.nu_e_best_var, self.nu_e_var))
 
         # mse = tf.reduce_sum(tf.square(self.restoration_op - target)) / tf.size(target, out_type=tf.float32)
-        mse = tf.reduce_sum(tf.square(tf.reshape(self.res, [-1]) - self.target_op)) / tf.cast(tf.size(self.target_op), dtype=tf.float32)
+        #tf.round(tf.reshape(self.res, [-1]) * 255) / 255
+        mse = tf.reduce_sum(tf.square(tf.round(tf.reshape(self.res, [-1]) * 255) / 255 - self.target_op)) / tf.cast(tf.size(self.target_op), dtype=tf.float32)
+        # margin in pixel to determine epsilon
+        epsilon = self.margin * 1/(2**8)
+        loss_pixel = tf.reduce_mean(tf.maximum(0., tf.square(tf.subtract(tf.abs(tf.subtract(tf.reshape(self.res, [-1]), self.target_op)), epsilon))))
 
         self.num_pi_op = tf.count_nonzero(pis_mask)
 
@@ -214,7 +219,7 @@ class Smoe:
         u_l1 = self.u_l1 * tf.reduce_sum(tf.matrix_diag_part(A)) # * (tf.cast(self.num_pi_op, tf.float32) / self.start_pis)
         #'''
 
-        self.loss_op = mse + pis_l1 + u_l1
+        self.loss_op = loss_pixel + pis_l1 + u_l1
 
         self.mse_op = mse * (255 ** 2)
 
