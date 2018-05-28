@@ -8,6 +8,7 @@ import numpy as np
 import tensorflow as tf
 import os
 import shutil
+import cv2
 
 from smoe import Smoe
 from plotter import ImagePlotter, LossPlotter
@@ -17,9 +18,33 @@ from utils import save_model, load_params
 
 def main(image_path, results_path, iterations, validation_iterations, kernels_per_dim, params_file, l1reg, base_lr,
          batches, checkpoint_path, lr_div, lr_mult, disable_train_pis, disable_train_gammas, radial_as):
-    orig = plt.imread(image_path)
-    if orig.dtype == np.uint8:
-        orig = orig.astype(np.float32)/255.
+
+    if image_path.lower().endswith(('.png', '.tif', '.tiff', '.pgm', '.ppm', '.jpg', '.jpeg')):
+        orig = plt.imread(image_path)
+        if orig.ndim == 2:
+            orig = np.expand_dims(orig, axis=-1)
+        if orig.dtype == np.uint8:
+            orig = orig.astype(np.float32) / 255.
+    elif image_path.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.flv')):
+        # TODO expand dimension in case of grayscale video
+        cap = cv2.VideoCapture(image_path)
+        num_of_frames = np.array(cap.get(7), dtype=np.int32)
+        height = np.array(cap.get(3), dtype=np.int32)
+        width = np.array(cap.get(4), dtype=np.int32)
+        orig = np.empty((width, height, num_of_frames, 3))
+        idx_frame = np.array(0, dtype=np.int32)
+        while(idx_frame < num_of_frames):
+            ret, curr_frame = cap.read()
+            #curr_frame = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
+            orig[:, :, idx_frame, :] = curr_frame
+            idx_frame += 1
+        orig = orig.astype(np.float32) / 255.
+
+    elif image_path.lower().endswith('.yuv'):
+        # TODO read raw video by OpenCV
+        raise ValueError("Raw Video Data is not supported yet!")
+    else:
+        raise ValueError("Unknown data format")
 
     if params_file is not None:
         init_params = load_params(params_file)
@@ -33,7 +58,7 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
 
     loss_plotter = LossPlotter(path=results_path + "/loss.png", quiet=True)
     image_plotter = ImagePlotter(path=results_path, options=['orig', 'reconstruction', 'gating', 'pis_hist'], quiet=True)
-    logger = ModelLogger(path=results_path)
+    logger = ModelLogger(path=results_path, as_media=True)
 
     smoe = Smoe(orig, kernels_per_dim, init_params=init_params, train_pis=not disable_train_pis,
                 train_gammas=not disable_train_gammas, radial_as=radial_as, start_batches=batches)

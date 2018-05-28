@@ -68,9 +68,9 @@ class Smoe:
 
         # generate initializations
         self.image = image
-        self.num_pixel = image.shape[0] * image.shape[1]
-        self.image_flat = image.flatten()
-        self.init_domain()
+        self.dim_domain = image.ndim - 1
+        self.num_pixel = np.prod(image.shape[0:self.dim_domain])
+        self.init_domain_and_target()
         self.intervals = self.calc_intervals(self.num_pixel, start_batches)
         self.batches = start_batches
         self.start_batches = start_batches
@@ -154,7 +154,7 @@ class Smoe:
 
 
         n_div = tf.reduce_prod(tf.matrix_diag_part(A), axis=-1)
-        p = 2 # 2d images, should be inferred from the shape of domain to support video etc.
+        p = self.image.ndim-1
         n_dis = np.sqrt(np.power(2*np.pi, p))
         n_quo = n_div / n_dis
 
@@ -400,7 +400,7 @@ class Smoe:
             reconstruction = np.concatenate(reconstructions)
             w_e = np.concatenate(w_es)
             self.reconstruction_image = reconstruction.reshape(self.image.shape)
-            self.weight_matrix_argmax = w_e.reshape(self.image.shape[0:2])
+            self.weight_matrix_argmax = w_e.reshape(self.image.shape[0:self.image.ndim-1])
             self.valid = True
 
         if train:
@@ -421,7 +421,7 @@ class Smoe:
     def get_reconstruction(self):
         if not self.valid:
             self.run_batched(train=False, update_reconstruction=True)
-        return self.reconstruction_image
+        return np.squeeze(self.reconstruction_image)
 
     def get_weight_matrix_argmax(self):
         if not self.valid:
@@ -463,64 +463,84 @@ class Smoe:
         return self.num_pis
 
     def get_original_image(self):
-        return self.image
+        return np.squeeze(self.image)
 
     def init_domain(self):
-        self.domain = self.gen_domain(self.image)
+        self.domain = self.gen_domain(self.image, self.image.ndim-1)
+
+    def init_domain_and_target(self):
+        dim_of_domain = self.image.ndim - 1
+        joint_domain = self.gen_domain(self.image, self.image.ndim-1)
+        joint_domain = np.reshape(joint_domain, (self.num_pixel, joint_domain.shape[-1]))
+        self.domain = joint_domain[:, :dim_of_domain]
+        self.image_flat = joint_domain[:, dim_of_domain:].flatten()
 
     def get_iter(self):
         return self.iter
 
     # quadratic for 2d in [0,1]
     def generate_kernel_grid(self, kernels_per_dim):
-        self.musX_init = self.gen_domain(kernels_per_dim)
-        RsXX = np.zeros((kernels_per_dim ** 2, 2, 2))
+        dim_of_domain = self.image.ndim-1
+        self.musX_init = self.gen_domain(kernels_per_dim, dim_of_domain)
 
-        for row in range(kernels_per_dim):
-            for col in range(kernels_per_dim):
-                sig_1 = 1 / (2 * (kernels_per_dim + 1))
-                sig_2 = 1 / (2 * (kernels_per_dim + 1))
-                roh = 0. #np.random.uniform(-0.1, 0.1)
-
-                RsXX[row * kernels_per_dim + col] = np.array([[sig_1 * sig_1, roh * sig_1 * sig_2],
-                                                              [roh * sig_1 * sig_2, sig_2 * sig_2]])
-
-        self.A_init = np.zeros_like(RsXX)
-        for k in range(self.A_init.shape[0]):
-            self.A_init[k] = np.linalg.cholesky(np.linalg.inv(RsXX[k]))
+        A_prototype = np.zeros((dim_of_domain, dim_of_domain))
+        np.fill_diagonal(A_prototype, 2 * (kernels_per_dim + 1))
+        self.A_init = np.tile(A_prototype, (kernels_per_dim ** dim_of_domain, 1, 1))
 
     def generate_experts(self, with_means=True):
         assert self.musX_init is not None, "need musX to generate experts"
 
-        if self.image.ndim == 2:
-            num_channels = 1
-        elif self.image.ndim == 3:
-            num_channels = self.image.shape[-1]
-        else:
-            raise ValueError("unsupported shape {}, only 2 or 2 dims are supported".format(self.image.shape))
+        num_channels = self.image.shape[-1]
 
-        self.gamma_e_init = np.zeros((self.musX_init.shape[0], 2, num_channels))
+        self.gamma_e_init = np.zeros((self.musX_init.shape[0], self.dim_domain, num_channels))
 
+        # TODO generalize initialization of nu_e's for arbitrary dim of input space
         if with_means:
-            # assumes that muX_init are in a square grid
-            stride = self.musX_init[0, 0]
-            height, width = self.image.shape[0], self.image.shape[1]
+            if self.dim_domain == 2:
+                # assumes that muX_init are in a square grid
+                stride = self.musX_init[0, 0]
+                height, width = self.image.shape[0], self.image.shape[1]
+                mean = np.empty((self.musX_init.shape[0], num_channels), dtype=np.float32)
+                for k, (y, x) in enumerate(zip(*self.musX_init.T)):
+                    x0 = int(round((x - stride) * width))
+                    x1 = int(round((x + stride) * width))
+                    y0 = int(round((y - stride) * height))
+                    y1 = int(round((y + stride) * height))
+
+                    mean[k] = np.mean(self.image[y0:y1, x0:x1], axis=(0, 1))
+            elif self.dim_domain == 3:
+                stride = self.musX_init[0, 0]
+                height, width, frames = self.image.shape[0], self.image.shape[1], self.image.shape[2]
+                mean = np.empty((self.musX_init.shape[0], num_channels), dtype=np.float32)
+                for k, (y, x, z) in enumerate(zip(*self.musX_init.T)):
+                    x0 = int(round((x - stride) * width))
+                    x1 = int(round((x + stride) * width))
+                    y0 = int(round((y - stride) * height))
+                    y1 = int(round((y + stride) * height))
+                    z0 = int(round((z - stride) * frames))
+                    z1 = int(round((z + stride) * frames))
+
+                    mean[k] = np.mean(self.image[y0:y1, x0:x1, z0:z1], axis=(0, 1, 2))
+            '''    
+            stride = self.musX_init[0, :]
+            size_of_img = self.image.shape
             mean = np.empty((self.musX_init.shape[0], num_channels), dtype=np.float32)
-            for k, (y, x) in enumerate(zip(*self.musX_init.T)):
-                x0 = int(round((x - stride) * width))
-                x1 = int(round((x + stride) * width))
-                y0 = int(round((y - stride) * height))
-                y1 = int(round((y + stride) * height))
-                
-                mean[k] = np.mean(self.image[y0:y1, x0:x1], axis=(0, 1))
+            for k in range(self.musX_init.shape[0]):
+                range_dim = []
+                for dim in range(dim_of_domain):
+                    dim0 = int(round((self.musX_init[k, dim] - stride[dim])))
+                    dim1 = int(round((self.musX_init[k, dim] + stride[dim])))
+                    range_dim.append(dim0:dim1)
+                mean[k] = np.mean(self.image[*range_dim], axis= )    
+            '''
         else:
             # choose nu_e to be 0.5 at center of kernel
-            mean = 0.5
+            mean = np.ones((self.musX_init.shape[0], num_channels)) * 0.5
 
         self.nu_e_init = mean
 
     def generate_pis(self, grid_size):
-        number = grid_size ** 2
+        number = grid_size ** self.musX_init.shape[1]
         self.pis_init = np.ones((number,), dtype=np.float32) / number
 
     @staticmethod
@@ -532,7 +552,6 @@ class Smoe:
         else:
             for ii in range(dim_of_input_space):
                 num_per_dim[ii] = in_
-        domain = np.zeros((np.prod(num_per_dim), dim_of_input_space))
 
         # create coordinates for each dimension
         coord = []
@@ -541,10 +560,13 @@ class Smoe:
             coord.append(np.linspace((1 / num_per_dim[ii]) / 2, 1 - (1 / num_per_dim[ii]) / 2, num_per_dim[ii]))
 
         # create grids
-        grids = np.meshgrid(*coord)
+        grids = np.meshgrid(*coord, indexing='ij')
 
-        for ii in range(dim_of_input_space):
-            domain[:, ii] = np.reshape(grids[ii], np.prod(num_per_dim), 1)
+        if type(in_) is np.ndarray:
+            domain = np.stack(grids, axis=-1)
+            domain = np.append(domain, in_, axis=-1)
+        else:
+            domain = np.reshape(np.stack(grids, axis=-1), (np.prod(num_per_dim), dim_of_input_space))
 
         return domain
 

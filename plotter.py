@@ -80,11 +80,25 @@ class ImagePlotter:
             ax.clear()
 
             if option == "orig":
-                ax.imshow(smoe.get_original_image(), cmap='gray', interpolation='None', vmin=0, vmax=1)
+                img = smoe.get_original_image()
+                if smoe.dim_domain == 3:
+                    if img.ndim == 4:
+                        img = img[:, :, 0, ::-1]
+                    else:
+                        img = img[:, :, 0]
+                ax.imshow(img, cmap='gray', interpolation='None', vmin=0, vmax=1)
             elif option == "reconstruction":
-                ax.imshow(smoe.get_reconstruction(), cmap='gray', interpolation='None', vmin=0, vmax=1)
+                img = smoe.get_reconstruction()
+                if smoe.dim_domain == 3:
+                    if img.ndim == 4:
+                        img = img[:, :, 0, ::-1]
+                    else:
+                        img = img[:, :, 0]
+                ax.imshow(img, cmap='gray', interpolation='None', vmin=0, vmax=1)
             elif option == "gating":
                 w_e_opt = smoe.get_weight_matrix_argmax()
+                if w_e_opt.ndim > 2:
+                    w_e_opt = w_e_opt[:, :, 0]
                 ax.imshow(w_e_opt, interpolation='None', cmap='prism')
             elif option == "pis_hist":
                 # TODO hist hotfix
