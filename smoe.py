@@ -2,6 +2,7 @@ import numpy as np
 import math
 import tensorflow as tf
 from tensorflow.python.ops.special_math_ops import _exponential_space_einsum as einsum
+import progressbar
 
 class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1, train_gammas=True, radial_as=False, iter_offset=0, margin=0.5):
@@ -45,6 +46,8 @@ class Smoe:
         self.end = None
         self.num_pi_op = None
         self.save_op = None
+        self.kernel_list = None
+        self.indices = None
 
         # optimizers
         self.optimizer1 = None
@@ -68,6 +71,7 @@ class Smoe:
 
         # generate initializations
         self.image = image
+        self.image_flat = None
         self.dim_domain = image.ndim - 1
         self.num_pixel = np.prod(image.shape[0:self.dim_domain])
         self.init_domain_and_target()
@@ -91,6 +95,8 @@ class Smoe:
 
         self.start_pis = self.pis_init.size
         self.margin = margin
+        self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches  #[np.arange(self.start_pis)] * self.start_batches
+        #self.kernel_list_per_batch = [np.arange(self.start_pis)] * self.start_batches
 
         gpu_options = tf.GPUOptions(allow_growth=True)
         self.session = tf.InteractiveSession(config=tf.ConfigProto(gpu_options=gpu_options))
@@ -126,6 +132,7 @@ class Smoe:
 
         self.start = tf.placeholder(dtype=tf.int32)
         self.end = tf.placeholder(dtype=tf.int32)
+        self.kernel_list = tf.placeholder(shape=(None,), dtype=tf.bool)
         # assume output channels of target are in the inner dimension
         self.target_op = self.target_op[self.start*num_channels:self.end*num_channels]
         self.domain_op = self.domain_op[self.start:self.end]
@@ -146,13 +153,17 @@ class Smoe:
         musX = tf.expand_dims(self.musX_var, axis=1)
 
         pis_mask = self.pis_var > 0
-        
-        musX = tf.boolean_mask(musX, pis_mask)
-        nu_e = tf.boolean_mask(self.nu_e_var, pis_mask)
-        gamma_e = tf.boolean_mask(self.gamma_e_var, pis_mask)
-        A = tf.boolean_mask(A, pis_mask)
-        pis = tf.boolean_mask(self.pis_var, pis_mask)
+        bool_mask = tf.equal(self.kernel_list, pis_mask)
 
+        # track indices of used and necessary kernels
+        self.indices = tf.constant(np.arange(self.start_pis), dtype=tf.int32)
+        self.indices = tf.boolean_mask(self.indices, bool_mask)
+
+        musX = tf.boolean_mask(musX, bool_mask)
+        nu_e = tf.boolean_mask(self.nu_e_var, bool_mask)
+        gamma_e = tf.boolean_mask(self.gamma_e_var, bool_mask)
+        A = tf.boolean_mask(A, bool_mask)
+        pis = tf.boolean_mask(self.pis_var, bool_mask)
 
         n_div = tf.reduce_prod(tf.matrix_diag_part(A), axis=-1)
         p = self.image.ndim-1
@@ -174,6 +185,10 @@ class Smoe:
 
         self.w_e_op = n_w / n_w_norm
         self.w_e_max_op = tf.argmax(self.w_e_op, axis=0)
+
+        kernel_list_batch_op = tf.reduce_sum(tf.cast(tf.greater(self.w_e_op, 10 ** -7), tf.int32), axis=1) > 0
+        self.indices = tf.boolean_mask(self.indices, kernel_list_batch_op)
+
 
         # TODO reorder nu_e and gamma_e to avoid unnecessary transpositions
         domain_tiled = tf.expand_dims(tf.transpose(self.domain_op), axis=0)
@@ -320,12 +335,17 @@ class Smoe:
                 validate = i % val_iter == 0
 
                 # TODO this should be refactored into samples_per_batch or removed
-                self.batches = math.ceil(self.start_batches * (num_pi / self.start_pis))
+                #self.batches = math.ceil(self.start_batches * (num_pi / self.start_pis))
                 # print("{0} -> {1} batches".format(self.start_batches, self.batches))
-                self.intervals = self.calc_intervals(self.num_pixel, self.batches)
+                #self.intervals = self.calc_intervals(self.num_pixel, self.batches)
 
                 loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=True,
-                                                             update_reconstruction=validate)
+                                                             update_reconstruction=False)
+
+                if validate:
+                    self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches
+                    loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=False,
+                                                                 update_reconstruction=True)
 
                 # TODO take loss_history into account
                 if np.isnan(loss_val) or (len(self.losses) > 0 and loss_val + 1 > (
@@ -376,8 +396,20 @@ class Smoe:
         reconstructions = []
         w_es = []
 
-        for start, end in self.intervals:
-            retrieve = [self.loss_op, self.mse_op, self.num_pi_op]
+        widgets = [
+            progressbar.AnimatedMarker(markers='◐◓◑◒'),
+            ' Iteration: {0}  '.format(self.iter),
+            progressbar.Percentage(),
+            ' ', progressbar.Counter('%(value)d/{0}'.format(self.start_batches)),
+            ' ', progressbar.Bar('>'),
+            ' ', progressbar.Timer(),
+            ' ', progressbar.ETA()
+        ]
+        bar = progressbar.ProgressBar(widgets=widgets)
+        #for ii, (start, end) in enumerate(self.intervals):
+        for ii in bar(range(len(self.intervals))):
+            start, end = self.intervals[ii]
+            retrieve = [self.loss_op, self.mse_op, self.num_pi_op, self.indices] # self.bool_mask # self.indices
             if train:
                 retrieve.append(self.accum_ops)
             if update_reconstruction:
@@ -387,19 +419,23 @@ class Smoe:
                                        feed_dict={self.start: start,
                                                   self.end: end,
                                                   self.pis_l1: pis_l1,
-                                                  self.u_l1: u_l1})
+                                                  self.u_l1: u_l1,
+                                                  self.kernel_list: self.kernel_list_per_batch[ii]})
 
             if update_reconstruction:
                 if train:
+                    reconstructions.append(results[5])
+                    w_es.append(results[6])
+                else:
                     reconstructions.append(results[4])
                     w_es.append(results[5])
-                else:
-                    reconstructions.append(results[3])
-                    w_es.append(results[4])
 
             loss_val += results[0] * (end - start) / self.num_pixel
             mse_val += results[1] * (end - start) / self.num_pixel
             num_pi = results[2]
+            bool_mask = np.zeros((self.start_pis,), dtype=bool)
+            bool_mask[results[3]] = True
+            self.kernel_list_per_batch[ii] = bool_mask
 
         if update_reconstruction:
             reconstruction = np.concatenate(reconstructions)
@@ -478,7 +514,7 @@ class Smoe:
         joint_domain = self.gen_domain(self.image, self.image.ndim-1)
         joint_domain = np.reshape(joint_domain, (self.num_pixel, joint_domain.shape[-1]))
         self.domain = joint_domain[:, :dim_of_domain]
-        self.image_flat = joint_domain[:, dim_of_domain:].flatten()
+        self.image_flat = joint_domain[:, dim_of_domain:].flatten()  # just flat in case of num_channels > 1
 
     def get_iter(self):
         return self.iter
