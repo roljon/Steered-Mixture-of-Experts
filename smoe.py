@@ -3,10 +3,11 @@ import math
 import tensorflow as tf
 from tensorflow.python.ops.special_math_ops import _exponential_space_einsum as einsum
 import progressbar
+from itertools import product
 
 class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1, train_gammas=True, radial_as=False, iter_offset=0, margin=0.5):
-        self.domain = None
+        self.batch_shape = None
 
         # init params
         self.pis_init = None
@@ -38,12 +39,12 @@ class Smoe:
         self.mse_op = None
         self.target_op = None
         self.domain_op = None
+        self.joint_domain_batched_op = None
         self.pis_l1 = None
         self.u_l1 = None
         self.zero_op = None
         self.accum_ops = None
-        self.start = None
-        self.end = None
+        self.current_batch_number = None
         self.num_pi_op = None
         self.save_op = None
         self.kernel_list = None
@@ -70,14 +71,15 @@ class Smoe:
         self.weight_matrix_argmax = None
 
         # generate initializations
+        self.start_batches = start_batches  # start_batches corresponds to desired batch numbers
         self.image = image
         self.image_flat = None
+        self.joint_domain_batched = None
         self.dim_domain = image.ndim - 1
         self.num_pixel = np.prod(image.shape[0:self.dim_domain])
         self.init_domain_and_target()
-        self.intervals = self.calc_intervals(self.num_pixel, start_batches)
         self.batches = start_batches
-        self.start_batches = start_batches
+        self.start_batches = self.joint_domain_batched.shape[0]
 
         assert kernels_per_dim is not None or init_params is not None, \
             "You need to specify the kernel grid size or give initial parameters."
@@ -95,17 +97,16 @@ class Smoe:
 
         self.start_pis = self.pis_init.size
         self.margin = margin
-        self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches  #[np.arange(self.start_pis)] * self.start_batches
-        #self.kernel_list_per_batch = [np.arange(self.start_pis)] * self.start_batches
+        self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches
 
         gpu_options = tf.GPUOptions(allow_growth=True)
         self.session = tf.InteractiveSession(config=tf.ConfigProto(gpu_options=gpu_options))
         # self.session = tf.Session()
 
-        self.init_model(self.domain, self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init,
+        self.init_model(self.joint_domain_batched, self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init,
                         train_pis, train_gammas, radial_as)
 
-    def init_model(self, domain_init, nu_e_init, gamma_e_init, pis_init, musX_init, A_init, train_pis=True, train_gammas=True, radial_as=False):
+    def init_model(self, joint_domain_batched, nu_e_init, gamma_e_init, pis_init, musX_init, A_init, train_pis=True, train_gammas=True, radial_as=False):
 
         self.nu_e_var = tf.Variable(nu_e_init, dtype=tf.float32)
         self.gamma_e_var = tf.Variable(gamma_e_init, trainable=train_gammas, dtype=tf.float32)
@@ -127,15 +128,21 @@ class Smoe:
 
         num_channels = gamma_e_init.shape[-1]
 
-        self.target_op = tf.constant(self.image_flat, dtype=tf.float32)
-        self.domain_op = tf.constant(domain_init, dtype=tf.float32)
 
-        self.start = tf.placeholder(dtype=tf.int32)
-        self.end = tf.placeholder(dtype=tf.int32)
+        self.joint_domain_batched_op = tf.constant(joint_domain_batched, dtype=tf.float32)
+
+        self.current_batch_number = tf.placeholder(dtype=tf.int32)
+
+        self.joint_domain_batched_op = self.joint_domain_batched_op[self.current_batch_number]
+        self.joint_domain_batched_op = tf.reshape(self.joint_domain_batched_op,
+                                                  (tf.reduce_prod(self.batch_shape[:-1]),
+                                                   tf.reduce_prod(self.batch_shape[-1])))
+        self.target_op = self.joint_domain_batched_op[:, self.dim_domain:]
+        self.target_op = tf.reshape(self.target_op, [-1])
+        self.domain_op = self.joint_domain_batched_op[:, :self.dim_domain]
+
         self.kernel_list = tf.placeholder(shape=(None,), dtype=tf.bool)
-        # assume output channels of target are in the inner dimension
-        self.target_op = self.target_op[self.start*num_channels:self.end*num_channels]
-        self.domain_op = self.domain_op[self.start:self.end]
+
 
         if radial_as:
            A_mask = np.ones(shape=(A_init.shape[0], 2, 2), dtype=np.float32)
@@ -153,7 +160,7 @@ class Smoe:
         musX = tf.expand_dims(self.musX_var, axis=1)
 
         pis_mask = self.pis_var > 0
-        bool_mask = tf.equal(self.kernel_list, pis_mask)
+        bool_mask = tf.logical_and(self.kernel_list, pis_mask)
 
         # track indices of used and necessary kernels
         self.indices = tf.constant(np.arange(self.start_pis), dtype=tf.int32)
@@ -184,11 +191,11 @@ class Smoe:
         n_w_norm = tf.maximum(10e-12, n_w_norm)
 
         self.w_e_op = n_w / n_w_norm
-        self.w_e_max_op = tf.argmax(self.w_e_op, axis=0)
+        self.w_e_max_op = tf.reshape(tf.argmax(self.w_e_op, axis=0), self.batch_shape[:-1])
 
-        kernel_list_batch_op = tf.reduce_sum(tf.cast(tf.greater(self.w_e_op, 10 ** -7), tf.int32), axis=1) > 0
+        kernel_list_batch_op = tf.reduce_sum(tf.cast(tf.greater(self.w_e_op, 0), tf.int32), axis=1) > 0 # 10 ** -9
         self.indices = tf.boolean_mask(self.indices, kernel_list_batch_op)
-
+        #self.indices = tf.Print(self.indices, [tf.count_nonzero(kernel_list_batch_op)])
 
         # TODO reorder nu_e and gamma_e to avoid unnecessary transpositions
         domain_tiled = tf.expand_dims(tf.transpose(self.domain_op), axis=0)
@@ -213,7 +220,7 @@ class Smoe:
                                            tf.assign(self.nu_e_best_var, self.nu_e_var))
 
         # mse = tf.reduce_sum(tf.square(self.restoration_op - target)) / tf.size(target, out_type=tf.float32)
-        #tf.round(tf.reshape(self.res, [-1]) * 255) / 255
+
         mse = tf.reduce_sum(tf.square(tf.round(tf.reshape(self.res, [-1]) * 255) / 255 - self.target_op)) / tf.cast(tf.size(self.target_op), dtype=tf.float32)
         # margin in pixel to determine epsilon
         epsilon = self.margin * 1/(2**8)
@@ -237,6 +244,8 @@ class Smoe:
         self.loss_op = loss_pixel + pis_l1 + u_l1
 
         self.mse_op = mse * (255 ** 2)
+
+        self.res = tf.reshape(self.res, self.batch_shape[:-1] + (num_channels,))
 
         init_new_vars_op = tf.global_variables_initializer()
         self.session.run(init_new_vars_op)
@@ -334,11 +343,6 @@ class Smoe:
             try:
                 validate = i % val_iter == 0
 
-                # TODO this should be refactored into samples_per_batch or removed
-                #self.batches = math.ceil(self.start_batches * (num_pi / self.start_pis))
-                # print("{0} -> {1} batches".format(self.start_batches, self.batches))
-                #self.intervals = self.calc_intervals(self.num_pixel, self.batches)
-
                 loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=True,
                                                              update_reconstruction=False)
 
@@ -406,18 +410,15 @@ class Smoe:
             ' ', progressbar.ETA()
         ]
         bar = progressbar.ProgressBar(widgets=widgets)
-        #for ii, (start, end) in enumerate(self.intervals):
-        for ii in bar(range(len(self.intervals))):
-            start, end = self.intervals[ii]
-            retrieve = [self.loss_op, self.mse_op, self.num_pi_op, self.indices] # self.bool_mask # self.indices
+        for ii in bar(range(self.start_batches)):
+            retrieve = [self.loss_op, self.mse_op, self.num_pi_op, self.indices]
             if train:
                 retrieve.append(self.accum_ops)
             if update_reconstruction:
                 retrieve += [self.res, self.w_e_max_op]
 
             results = self.session.run(retrieve,
-                                       feed_dict={self.start: start,
-                                                  self.end: end,
+                                       feed_dict={self.current_batch_number: ii,
                                                   self.pis_l1: pis_l1,
                                                   self.u_l1: u_l1,
                                                   self.kernel_list: self.kernel_list_per_batch[ii]})
@@ -430,18 +431,18 @@ class Smoe:
                     reconstructions.append(results[4])
                     w_es.append(results[5])
 
-            loss_val += results[0] * (end - start) / self.num_pixel
-            mse_val += results[1] * (end - start) / self.num_pixel
+            loss_val += results[0] * np.prod(self.joint_domain_batched.shape[1:-1]) / self.num_pixel
+            mse_val += results[1] * np.prod(self.joint_domain_batched.shape[1:-1]) / self.num_pixel
             num_pi = results[2]
             bool_mask = np.zeros((self.start_pis,), dtype=bool)
             bool_mask[results[3]] = True
             self.kernel_list_per_batch[ii] = bool_mask
 
         if update_reconstruction:
-            reconstruction = np.concatenate(reconstructions)
-            w_e = np.concatenate(w_es)
-            self.reconstruction_image = reconstruction.reshape(self.image.shape)
-            self.weight_matrix_argmax = w_e.reshape(self.image.shape[0:self.image.ndim-1])
+            reconstruction = np.stack(reconstructions)
+            w_e = np.stack(w_es)
+            self.reconstruction_image = self.uncubify(reconstruction, self.image.shape)
+            self.weight_matrix_argmax = self.uncubify(w_e, self.image.shape[0:self.image.ndim-1])
             self.valid = True
 
         if train:
@@ -506,15 +507,11 @@ class Smoe:
     def get_original_image(self):
         return np.squeeze(self.image)
 
-    def init_domain(self):
-        self.domain = self.gen_domain(self.image, self.image.ndim-1)
-
     def init_domain_and_target(self):
-        dim_of_domain = self.image.ndim - 1
-        joint_domain = self.gen_domain(self.image, self.image.ndim-1)
-        joint_domain = np.reshape(joint_domain, (self.num_pixel, joint_domain.shape[-1]))
-        self.domain = joint_domain[:, :dim_of_domain]
-        self.image_flat = joint_domain[:, dim_of_domain:].flatten()  # just flat in case of num_channels > 1
+        joint_domain = self.gen_domain(self.image, self.dim_domain)
+        self.joint_domain_batched = joint_domain
+        self.batch_shape = self.get_batch_shape(self.start_batches, joint_domain.shape)
+        self.joint_domain_batched = self.cubify(self.joint_domain_batched, self.batch_shape)
 
     def get_iter(self):
         return self.iter
@@ -622,3 +619,103 @@ class Smoe:
             start = end
 
         return intervals
+
+    @staticmethod
+    def cubify(arr, newshape):
+        oldshape = np.array(arr.shape)
+        repeats = (oldshape / newshape).astype(int)
+        tmpshape = np.column_stack([repeats, newshape]).ravel()
+        order = np.arange(len(tmpshape))
+        order = np.concatenate([order[::2], order[1::2]])
+        # newshape must divide oldshape evenly or else ValueError will be raised
+        return arr.reshape(tmpshape).transpose(order).reshape(-1, *newshape)
+
+    @staticmethod
+    def uncubify(arr, oldshape):
+        N, newshape = arr.shape[0], arr.shape[1:]
+        oldshape = np.array(oldshape)
+        repeats = (oldshape / newshape).astype(int)
+        tmpshape = np.concatenate([repeats, newshape])
+        order = np.arange(len(tmpshape)).reshape(2, -1).ravel(order='F')
+        return arr.reshape(tmpshape).transpose(order).reshape(oldshape)
+
+    @staticmethod
+    def get_batch_shape(desired_batches, joint_domain_shape):
+
+        def divisors(n):
+            # get factors and their counts
+            factors = {}
+            nn = n
+            i = 2
+            while i * i <= nn:
+                while nn % i == 0:
+                    if not i in factors:
+                        factors[i] = 0
+                    factors[i] += 1
+                    nn //= i
+                i += 1
+            if nn > 1:
+                factors[nn] = 1
+
+            primes = list(factors.keys())
+
+            # generates factors from primes[k:] subset
+            def generate(k):
+                if k == len(primes):
+                    yield 1
+                else:
+                    rest = generate(k + 1)
+                    prime = primes[k]
+                    for factor in rest:
+                        prime_to_i = 1
+                        # prime_to_i iterates prime**i values, i being all possible exponents
+                        for _ in range(factors[prime] + 1):
+                            yield factor * prime_to_i
+                            prime_to_i *= prime
+
+            # in python3, `yield from generate(0)` would also work
+            for factor in generate(0):
+                yield factor
+
+
+        # determine all divisors for each dimension (except last dimension)
+        factors = []
+        for ii in range(joint_domain_shape.__len__()-1):
+            divisor = []
+            for fac in divisors(joint_domain_shape[ii]):
+                divisor.append(fac)
+            factors.append(divisor)
+        factors.append([1])
+
+        # get all variations of dimension divisors as tuples
+        shapes = list(product(*factors))
+
+        # determine all possible batch sizes
+        possible_batches = np.zeros((shapes.__len__(), 1))
+        for ii, shape in enumerate(shapes):
+            # possible_batches.append(np.prod(shape[:-1]))
+            possible_batches[ii] = np.prod(shape[:-1])
+
+        # determine that batch size which is the closest to the desired one (and bigger)
+        diff = possible_batches - desired_batches
+        # diff = diff * -1
+        diff[diff < 0] = np.inf
+        aimed_batch = possible_batches[np.argmin(diff)]
+        indices = np.where(possible_batches == aimed_batch)[0]
+        batch_shape_divisor = []
+        for idx in indices:
+            batch_shape_divisor.append(shapes[idx])
+
+        # determine that divisor tuple so that cubes come out as close as possible
+        sum_of_dim_divisors = np.zeros((batch_shape_divisor.__len__(), 1))
+        for ii, divs in enumerate(batch_shape_divisor):
+            sum_of_dim_divisors[ii] = np.sum(divs[0:2])  # also possible np.sum(divs[0:2]) to make sure that spatial blocks are more divided
+
+        batch_shape_divisor = batch_shape_divisor[np.argmin(sum_of_dim_divisors)]
+        new_shape = []
+        for ii in range(joint_domain_shape.__len__()):
+            new_shape.append(int(joint_domain_shape[ii] / batch_shape_divisor[ii]))
+
+        return tuple(new_shape)
+
+
