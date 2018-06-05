@@ -85,7 +85,7 @@ if __name__ == '__main__':
     parser.add_argument('-r', '--results_path', type=str, required=True, help="results path")
     parser.add_argument('-n', '--iterations', type=int, default=10000, help="number of iterations")
     parser.add_argument('-v', '--validation_iterations', type=int, default=100, help="number of iterations between validations")
-    parser.add_argument('-k', '--kernels_per_dim', type=int, default=12, help="number of kernels per dimension")
+    parser.add_argument('-k', '--kernels_per_dim', type=int, default=12, nargs='+', help="number of kernels per dimension")
     parser.add_argument('-p', '--params_file', type=str, default=None, help="parameter file for model initialization")
     parser.add_argument('-reg', '--l1reg', type=float, default=0, help="l1 regularization for pis")
     parser.add_argument('-lr', '--base_lr', type=float, default=0.001, help="base learning rate")

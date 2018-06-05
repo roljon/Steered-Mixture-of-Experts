@@ -93,7 +93,7 @@ class Smoe:
         else:
             self.generate_kernel_grid(kernels_per_dim)
             self.generate_experts()
-            self.generate_pis(kernels_per_dim)
+            self.generate_pis()
 
         self.start_pis = self.pis_init.size
         self.margin = margin
@@ -520,9 +520,18 @@ class Smoe:
         dim_of_domain = self.image.ndim-1
         self.musX_init = self.gen_domain(kernels_per_dim, dim_of_domain)
 
-        A_prototype = np.zeros((dim_of_domain, dim_of_domain))
-        np.fill_diagonal(A_prototype, 2 * (kernels_per_dim + 1))
-        self.A_init = np.tile(A_prototype, (kernels_per_dim ** dim_of_domain, 1, 1))
+
+        if len(kernels_per_dim) > 1:
+            A_values = np.zeros((dim_of_domain,))
+            for ii in range(dim_of_domain):
+                A_values[ii] = 2 * (kernels_per_dim[ii] + 1)
+            A_prototype = np.diag(A_values)
+            number_of_kernel = np.prod(kernels_per_dim)
+        else:
+            A_prototype = np.zeros((dim_of_domain, dim_of_domain))
+            np.fill_diagonal(A_prototype, 2 * (kernels_per_dim + 1))
+            number_of_kernel = kernels_per_dim ** dim_of_domain
+        self.A_init = np.tile(A_prototype, (number_of_kernel, 1, 1))
 
     def generate_experts(self, with_means=True):
         assert self.musX_init is not None, "need musX to generate experts"
@@ -576,9 +585,9 @@ class Smoe:
 
         self.nu_e_init = mean
 
-    def generate_pis(self, grid_size):
-        number = grid_size ** self.musX_init.shape[1]
-        self.pis_init = np.ones((number,), dtype=np.float32)  # / number
+    def generate_pis(self):
+        number = self.musX_init.shape[0]
+        self.pis_init = np.ones((number,), dtype=np.float32) / number
 
     @staticmethod
     def gen_domain(in_, dim_of_input_space=2):
@@ -588,7 +597,10 @@ class Smoe:
                 num_per_dim[ii] = in_.shape[ii]
         else:
             for ii in range(dim_of_input_space):
-                num_per_dim[ii] = in_
+                if len(in_) > 1:
+                    num_per_dim[ii] = in_[ii]
+                else:
+                    num_per_dim[ii] = in_
 
         # create coordinates for each dimension
         coord = []
