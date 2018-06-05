@@ -114,6 +114,7 @@ class Smoe:
         #self.A_var = tf.Variable(A_init, dtype=tf.float32)
         self.pis_var = tf.Variable(pis_init, trainable=train_pis, dtype=tf.float32)
 
+
         # TODO make radial work again, uncomment for pcs scripts
         if A_init.ndim == 1:
             radial_as = True
@@ -125,6 +126,7 @@ class Smoe:
                 self.A_var = tf.Variable(A_init[:, 0, 0], dtype=tf.float32)
         else:
             self.A_var = tf.Variable(A_init, dtype=tf.float32)
+
 
         num_channels = gamma_e_init.shape[-1]
 
@@ -145,17 +147,13 @@ class Smoe:
 
 
         if radial_as:
-           A_mask = np.ones(shape=(A_init.shape[0], 2, 2), dtype=np.float32)
-           A_mask[:, 0, 1] = 0
-           A_mask[:, 1, 0] = 0
-           A = tf.tile(tf.expand_dims(tf.expand_dims(self.A_var, axis=-1), axis=-1), (1, 2, 2))
-           #print(A_mask.shape)
-           #print(A.shape)
+           A_mask = np.zeros((self.dim_domain, self.dim_domain))
+           np.fill_diagonal(A_mask, 1)
+           A_mask = np.tile(A_mask, (A_init.shape[0], 1, 1))
+           A = tf.tile(tf.expand_dims(tf.expand_dims(self.A_var, axis=-1), axis=-1), (1, self.dim_domain, self.dim_domain))
            A = A * A_mask
-           #self.a_test = A
         else:
            A = self.A_var
-        #A = self.A_var
 
         musX = tf.expand_dims(self.musX_var, axis=1)
 
@@ -429,6 +427,7 @@ class Smoe:
                     w_es.append(results[6])
                 else:
                     reconstructions.append(results[4])
+                    #remapped_wes = self.remap_kernel_indices(results[5], results[3])
                     w_es.append(results[5])
 
             loss_val += results[0] * np.prod(self.joint_domain_batched.shape[1:-1]) / self.num_pixel
@@ -579,7 +578,7 @@ class Smoe:
 
     def generate_pis(self, grid_size):
         number = grid_size ** self.musX_init.shape[1]
-        self.pis_init = np.ones((number,), dtype=np.float32) / number
+        self.pis_init = np.ones((number,), dtype=np.float32)  # / number
 
     @staticmethod
     def gen_domain(in_, dim_of_input_space=2):
@@ -718,4 +717,23 @@ class Smoe:
 
         return tuple(new_shape)
 
+    @staticmethod
+    def remap_kernel_indices(w_es_mat, kernel_list):
+        w_es_flat = w_es_mat.flatten()
+        w_es_tmp = w_es_flat
+        idx_shift = int(0)
+        for ii in range(kernel_list.size):
+            #if ii + idx_shift != kernel_list[ii]:
+            #    idx_shift += kernel_list[ii] - (ii + idx_shift)
+            #while ii + idx_shift != kernel_list[ii]:
+             #   idx_shift += 1
+
+             #   w_es_tmp[np.where(w_es_flat == ii)] += idx_shift
+            #if ii != kernel_list[ii]:
+            #    w_es_flat[np.where(w_es_flat >= ii)] += 1
+            w_es_tmp[np.where(w_es_flat == ii)] = kernel_list[ii]
+
+        remapped_wes = np.reshape(w_es_tmp, w_es_mat.shape)
+
+        return remapped_wes
 
