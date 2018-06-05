@@ -593,8 +593,11 @@ class Smoe:
         # create coordinates for each dimension
         coord = []
         for ii in range(dim_of_input_space):
-            # equal spacing between domain positions and boarder
-            coord.append(np.linspace((1 / num_per_dim[ii]) / 2, 1 - (1 / num_per_dim[ii]) / 2, num_per_dim[ii]))
+            if type(in_) is np.ndarray:
+                coord.append(np.linspace(0, 1, num_per_dim[ii]))
+            else:
+                # equal spacing between domain positions and boarder
+                coord.append(np.linspace((1 / num_per_dim[ii]) / 2, 1 - (1 / num_per_dim[ii]) / 2, num_per_dim[ii]))
 
         # create grids
         grids = np.meshgrid(*coord, indexing='ij')
