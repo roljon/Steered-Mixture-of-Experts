@@ -529,8 +529,8 @@ class Smoe:
             number_of_kernel = np.prod(kernels_per_dim)
         else:
             A_prototype = np.zeros((dim_of_domain, dim_of_domain))
-            np.fill_diagonal(A_prototype, 2 * (kernels_per_dim + 1))
-            number_of_kernel = kernels_per_dim ** dim_of_domain
+            np.fill_diagonal(A_prototype, 2 * (kernels_per_dim[0] + 1))
+            number_of_kernel = kernels_per_dim[0] ** dim_of_domain
         self.A_init = np.tile(A_prototype, (number_of_kernel, 1, 1))
 
     def generate_experts(self, with_means=True):
@@ -600,7 +600,7 @@ class Smoe:
                 if len(in_) > 1:
                     num_per_dim[ii] = in_[ii]
                 else:
-                    num_per_dim[ii] = in_
+                    num_per_dim[ii] = in_[0]
 
         # create coordinates for each dimension
         coord = []
