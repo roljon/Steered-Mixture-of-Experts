@@ -544,27 +544,27 @@ class Smoe:
         if with_means:
             if self.dim_domain == 2:
                 # assumes that muX_init are in a square grid
-                stride = self.musX_init[0, 0]
+                stride = self.musX_init[0]
                 height, width = self.image.shape[0], self.image.shape[1]
                 mean = np.empty((self.musX_init.shape[0], num_channels), dtype=np.float32)
                 for k, (y, x) in enumerate(zip(*self.musX_init.T)):
-                    x0 = int(round((x - stride) * width))
-                    x1 = int(round((x + stride) * width))
-                    y0 = int(round((y - stride) * height))
-                    y1 = int(round((y + stride) * height))
+                    x0 = int(round((x - stride[0]) * width))
+                    x1 = int(round((x + stride[0]) * width))
+                    y0 = int(round((y - stride[0]) * height))
+                    y1 = int(round((y + stride[0]) * height))
 
                     mean[k] = np.mean(self.image[y0:y1, x0:x1], axis=(0, 1))
             elif self.dim_domain == 3:
-                stride = self.musX_init[0, 0]
+                stride = self.musX_init[0]
                 height, width, frames = self.image.shape[0], self.image.shape[1], self.image.shape[2]
                 mean = np.empty((self.musX_init.shape[0], num_channels), dtype=np.float32)
                 for k, (y, x, z) in enumerate(zip(*self.musX_init.T)):
-                    x0 = int(round((x - stride) * width))
-                    x1 = int(round((x + stride) * width))
-                    y0 = int(round((y - stride) * height))
-                    y1 = int(round((y + stride) * height))
-                    z0 = int(round((z - stride) * frames))
-                    z1 = int(round((z + stride) * frames))
+                    x0 = int(round((x - stride[0]) * width))
+                    x1 = int(round((x + stride[0]) * width))
+                    y0 = int(round((y - stride[1]) * height))
+                    y1 = int(round((y + stride[1]) * height))
+                    z0 = int(round((z - stride[2]) * frames))
+                    z1 = int(round((z + stride[2]) * frames))
 
                     mean[k] = np.mean(self.image[y0:y1, x0:x1, z0:z1], axis=(0, 1, 2))
             '''    
