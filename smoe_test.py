@@ -17,7 +17,7 @@ from utils import save_model, load_params
 
 
 def main(image_path, results_path, iterations, validation_iterations, kernels_per_dim, params_file, l1reg, base_lr,
-         batches, checkpoint_path, lr_div, lr_mult, disable_train_pis, disable_train_gammas, radial_as):
+         batches, checkpoint_path, lr_div, lr_mult, disable_train_pis, disable_train_gammas, radial_as, use_determinant):
 
     if image_path.lower().endswith(('.png', '.tif', '.tiff', '.pgm', '.ppm', '.jpg', '.jpeg')):
         orig = plt.imread(image_path)
@@ -61,7 +61,8 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
     logger = ModelLogger(path=results_path, as_media=True)
 
     smoe = Smoe(orig, kernels_per_dim, init_params=init_params, train_pis=not disable_train_pis,
-                train_gammas=not disable_train_gammas, radial_as=radial_as, start_batches=batches)
+                train_gammas=not disable_train_gammas, radial_as=radial_as, start_batches=batches,
+                use_determinant=use_determinant)
 
     optimizer1 = tf.train.AdamOptimizer(base_lr)
     optimizer2 = tf.train.AdamOptimizer(base_lr/lr_div)
@@ -97,6 +98,7 @@ if __name__ == '__main__':
     parser.add_argument('-dp', '--disable_train_pis', type=bool, default=False, help="disable_train_pis")
     parser.add_argument('-dg', '--disable_train_gammas', type=bool, default=False, help="disable_train_gammas")
     parser.add_argument('-ra', '--radial_as', type=bool, default=False, help="radial_as")
+    parser.add_argument('-ud', '--use_determinant', type=bool, default=True, help="use determinants for gaussian normalization")
 
     args = parser.parse_args()
 

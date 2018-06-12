@@ -6,7 +6,7 @@ import progressbar
 from itertools import product
 
 class Smoe:
-    def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1, train_gammas=True, radial_as=False, iter_offset=0, margin=0.5):
+    def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1, train_gammas=True, radial_as=False, use_determinant=True, iter_offset=0, margin=0.5):
         self.batch_shape = None
 
         # init params
@@ -104,9 +104,9 @@ class Smoe:
         # self.session = tf.Session()
 
         self.init_model(self.joint_domain_batched, self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init,
-                        train_pis, train_gammas, radial_as)
+                        train_pis, train_gammas, radial_as, use_determinant)
 
-    def init_model(self, joint_domain_batched, nu_e_init, gamma_e_init, pis_init, musX_init, A_init, train_pis=True, train_gammas=True, radial_as=False):
+    def init_model(self, joint_domain_batched, nu_e_init, gamma_e_init, pis_init, musX_init, A_init, train_pis=True, train_gammas=True, radial_as=False, use_determinant=True):
 
         self.nu_e_var = tf.Variable(nu_e_init, dtype=tf.float32)
         self.gamma_e_var = tf.Variable(gamma_e_init, trainable=train_gammas, dtype=tf.float32)
@@ -170,19 +170,23 @@ class Smoe:
         A = tf.boolean_mask(A, bool_mask)
         pis = tf.boolean_mask(self.pis_var, bool_mask)
 
-        n_div = tf.reduce_prod(tf.matrix_diag_part(A), axis=-1)
-        p = self.image.ndim-1
-        n_dis = np.sqrt(np.power(2*np.pi, p))
-        n_quo = n_div / n_dis
-
         # prepare domain
         domain_exp = self.domain_op
         domain_exp = tf.tile(tf.expand_dims(domain_exp, axis=0), (tf.shape(musX)[0], 1, 1))
 
         x_sub_mu = tf.expand_dims(domain_exp - musX, axis=-1)
+
         n_exp = tf.exp(-0.5 * einsum('abli,alm,anm,abnj->ab', x_sub_mu, A, A, x_sub_mu))
 
-        N = tf.tile(tf.expand_dims(n_quo, axis=1), (1, tf.shape(n_exp)[1])) * n_exp
+        if use_determinant:
+            n_div = tf.reduce_prod(tf.matrix_diag_part(A), axis=-1)
+            p = self.image.ndim - 1
+            n_dis = np.sqrt(np.power(2 * np.pi, p))
+            n_quo = n_div / n_dis
+
+            N = tf.tile(tf.expand_dims(n_quo, axis=1), (1, tf.shape(n_exp)[1])) * n_exp
+        else:
+            N = n_exp
 
         n_w = N * tf.expand_dims(pis, axis=-1)
         n_w_norm = tf.reduce_sum(n_w, axis=0)
