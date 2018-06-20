@@ -177,8 +177,8 @@ class Smoe:
         x_sub_mu = tf.expand_dims(domain_exp - musX, axis=-1)
 
         # use only triangular part
-        A_upper = tf.matrix_band_part(A, 0, -1)
-        n_exp = tf.exp(-0.5 * einsum('abli,alm,anm,abnj->ab', x_sub_mu, A_upper, A_upper, x_sub_mu))
+        A_lower = tf.matrix_band_part(A, -1, 0)
+        n_exp = tf.exp(-0.5 * einsum('abli,alm,anm,abnj->ab', x_sub_mu, A_lower, A_lower, x_sub_mu))
 
         if use_determinant:
             n_div = tf.reduce_prod(tf.matrix_diag_part(A), axis=-1)
