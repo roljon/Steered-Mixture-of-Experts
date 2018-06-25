@@ -27,7 +27,7 @@ class ModelLogger:
         iter_ = smoe.get_iter()
         reconstruction = smoe.get_reconstruction()
 
-        save_model(smoe, self.params_path + "/{0:08d}_params.pkl".format(iter_), best=False, reduce=True)
+        save_model(smoe, self.params_path + "/{0:08d}_params.pkl".format(iter_), best=False, reduce=True, quantize=True)
 
         if self.as_media:
             if smoe.dim_domain == 2:
