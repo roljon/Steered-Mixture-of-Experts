@@ -4,9 +4,12 @@ import tensorflow as tf
 from tensorflow.python.ops.special_math_ops import _exponential_space_einsum as einsum
 import progressbar
 from itertools import product
+from quantizer import quantize_params, rescaler
 
 class Smoe:
-    def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1, train_gammas=True, radial_as=False, use_determinant=True, iter_offset=0, margin=0.5):
+    def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1,
+                 train_gammas=True, radial_as=False, use_determinant=True, quantization_mode=0, bit_depths=None,
+                 iter_offset=0, margin=0.5):
         self.batch_shape = None
 
         # init params
@@ -15,6 +18,9 @@ class Smoe:
         self.A_init = None
         self.gamma_e_init = None
         self.nu_e_init = None
+
+        self.qparams = None
+        self.rparams = None
 
         # tf vars
         self.pis_var = None
@@ -49,6 +55,12 @@ class Smoe:
         self.save_op = None
         self.kernel_list = None
         self.indices = None
+        # tf ops - feeding points
+        self.musX = None
+        self.nu_e = None
+        self.gamma_e = None
+        self.A = None
+        self.pis = None
 
         # optimizers
         self.optimizer1 = None
@@ -58,17 +70,26 @@ class Smoe:
         # others
         # TODO refactor to logger class
         self.losses = []
+        self.qlosses = []
         self.losses_history = []
         self.best_loss = None
+        self.best_qloss = None
         self.mses = []
+        self.qmses = []
         self.mses_history = []
         self.best_mse = []
+        self.best_qmse = []
         self.num_pis = []
 
         self.iter = iter_offset
         self.valid = False
+        self.qvalid = False
         self.reconstruction_image = None
         self.weight_matrix_argmax = None
+        self.qreconstruction_image = None
+        self.qweight_matrix_argmax = None
+        self.quantization_mode = quantization_mode
+        self.bit_depths = bit_depths
 
         # generate initializations
         self.start_batches = start_batches  # start_batches corresponds to desired batch numbers
@@ -155,7 +176,6 @@ class Smoe:
         else:
            A = self.A_var
 
-        musX = tf.expand_dims(self.musX_var, axis=1)
 
         pis_mask = self.pis_var > 0
         bool_mask = tf.logical_and(self.kernel_list, pis_mask)
@@ -164,12 +184,20 @@ class Smoe:
         self.indices = tf.constant(np.arange(self.start_pis), dtype=tf.int32)
         self.indices = tf.boolean_mask(self.indices, bool_mask)
 
-        musX = tf.boolean_mask(musX, bool_mask)
-        nu_e = tf.boolean_mask(self.nu_e_var, bool_mask)
-        gamma_e = tf.boolean_mask(self.gamma_e_var, bool_mask)
-        A = tf.boolean_mask(A, bool_mask)
-        pis = tf.boolean_mask(self.pis_var, bool_mask)
+        # using self-Variables to define feed point
+        self.musX = tf.boolean_mask(self.musX_var, bool_mask)
+        self.nu_e = tf.boolean_mask(self.nu_e_var, bool_mask)
+        self.gamma_e = tf.boolean_mask(self.gamma_e_var, bool_mask)
+        self.A = tf.boolean_mask(A, bool_mask)
+        self.pis = tf.boolean_mask(self.pis_var, bool_mask)
 
+        musX = self.musX
+        nu_e = self.nu_e
+        gamma_e = self.gamma_e
+        A = self.A
+        pis = self.pis
+
+        musX = tf.expand_dims(musX, axis=1)
         # prepare domain
         domain_exp = self.domain_op
         domain_exp = tf.tile(tf.expand_dims(domain_exp, axis=0), (tf.shape(musX)[0], 1, 1))
@@ -331,9 +359,18 @@ class Smoe:
         # self.losses = []
         # self.mses = []
         # self.num_pis = []
+        if self.quantization_mode == 1:
+            self.qparams = quantize_params(self, self.get_params())
+            self.rparams = rescaler(self, self.qparams)
+            self.best_qloss, self.best_qmse, _ = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=False, update_reconstruction=True,
+                                       with_quantized_params=True)
+            self.qlosses.append((0, self.best_qloss))
+            self.qmses.append((0, self.best_qmse))
 
         self.best_loss, self.best_mse, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=False,
                                                                  update_reconstruction=True)
+
+
         self.losses.append((0, self.best_loss))
         self.mses.append((0, self.best_mse))
         self.num_pis.append((0, num_pi))
@@ -351,9 +388,15 @@ class Smoe:
                                                              update_reconstruction=False)
 
                 if validate:
-                    self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches
+                    if self.quantization_mode == 1:
+                        self.qparams = quantize_params(self, self.get_params())
+                        self.rparams = rescaler(self, self.qparams)
+                        self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches
+                        qloss_val, qmse_val, _ = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=False,
+                                                                     update_reconstruction=True, with_quantized_params=True)
                     loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=False,
                                                                  update_reconstruction=True)
+                    # run batched with quant params
 
                 # TODO take loss_history into account
                 if np.isnan(loss_val) or (len(self.losses) > 0 and loss_val + 1 > (
@@ -376,6 +419,10 @@ class Smoe:
                         self.best_mse = mse_val
                     self.mses.append((i, mse_val))
 
+                    if self.quantization_mode == 1:
+                        self.qmses.append((i, qmse_val))
+                        self.qlosses.append((i, qloss_val))
+
                     self.num_pis.append((i, num_pi))
 
                     # run callbacks
@@ -391,8 +438,10 @@ class Smoe:
         print("end loss/mse: ", loss_val, "/", mse_val, "@iter: ", i)
         print("best loss/mse: ", self.best_loss, "/", self.best_mse)
 
-    def run_batched(self, pis_l1=0, u_l1=0, train=True, update_reconstruction=False):
+    def run_batched(self, pis_l1=0, u_l1=0, train=True, update_reconstruction=False, with_quantized_params=False):
         self.valid = False
+        if with_quantized_params:
+            self.qvalid = False
 
         if train:
             self.session.run(self.zero_op)
@@ -416,17 +465,15 @@ class Smoe:
         bar = progressbar.ProgressBar(widgets=widgets)
         for ii in bar(range(self.start_batches)):
             retrieve = [self.loss_op, self.mse_op, self.num_pi_op, self.indices]
+            feed_dict = {self.current_batch_number: ii, self.pis_l1: pis_l1, self.u_l1: u_l1, self.kernel_list: self.kernel_list_per_batch[ii]}
             if train:
                 retrieve.append(self.accum_ops)
             if update_reconstruction:
                 retrieve += [self.res, self.w_e_max_op]
+                if with_quantized_params:
+                    feed_dict.update({self.A: self.rparams["A"], self.musX: self.rparams["musX"], self.nu_e: self.rparams["nu_e"], self.gamma_e: self.rparams["gamma_e"], self.pis: self.rparams["pis"]})
 
-            results = self.session.run(retrieve,
-                                       feed_dict={self.current_batch_number: ii,
-                                                  self.pis_l1: pis_l1,
-                                                  self.u_l1: u_l1,
-                                                  self.kernel_list: self.kernel_list_per_batch[ii]})
-
+            results = self.session.run(retrieve, feed_dict=feed_dict)
             if update_reconstruction:
                 if train:
                     reconstructions.append(results[5])
@@ -439,16 +486,22 @@ class Smoe:
             loss_val += results[0] * np.prod(self.joint_domain_batched.shape[1:-1]) / self.num_pixel
             mse_val += results[1] * np.prod(self.joint_domain_batched.shape[1:-1]) / self.num_pixel
             num_pi = results[2]
-            bool_mask = np.zeros((self.start_pis,), dtype=bool)
-            bool_mask[results[3]] = True
-            self.kernel_list_per_batch[ii] = bool_mask
+            if not with_quantized_params:
+                bool_mask = np.zeros((self.start_pis,), dtype=bool)
+                bool_mask[results[3]] = True
+                self.kernel_list_per_batch[ii] = bool_mask
 
         if update_reconstruction:
             reconstruction = np.stack(reconstructions)
             w_e = np.stack(w_es)
-            self.reconstruction_image = self.uncubify(reconstruction, self.image.shape)
-            self.weight_matrix_argmax = self.uncubify(w_e, self.image.shape[0:self.image.ndim-1])
-            self.valid = True
+            if not with_quantized_params:
+                self.reconstruction_image = self.uncubify(reconstruction, self.image.shape)
+                self.weight_matrix_argmax = self.uncubify(w_e, self.image.shape[0:self.image.ndim-1])
+                self.valid = True
+            else:
+                self.qreconstruction_image = self.uncubify(reconstruction, self.image.shape)
+                self.qweight_matrix_argmax = self.uncubify(w_e, self.image.shape[0:self.image.ndim - 1])
+                self.qvalid = True
 
         if train:
             self.session.run(self.train_op)
@@ -469,6 +522,11 @@ class Smoe:
         if not self.valid:
             self.run_batched(train=False, update_reconstruction=True)
         return np.squeeze(self.reconstruction_image)
+
+    def get_qreconstruction(self):
+        if not self.qvalid:
+            self.run_batched(train=False, update_reconstruction=True, with_quantized_params=True)
+        return np.squeeze(self.qreconstruction_image)
 
     def get_weight_matrix_argmax(self):
         if not self.valid:
@@ -491,6 +549,9 @@ class Smoe:
     def get_losses(self):
         return self.losses
 
+    def get_qlosses(self):
+        return self.qlosses
+
     def get_best_loss(self):
         return self.best_loss
 
@@ -499,6 +560,9 @@ class Smoe:
 
     def get_mses(self):
         return self.mses
+
+    def get_qmses(self):
+        return self.qmses
 
     def get_best_mse(self):
         return self.best_mse

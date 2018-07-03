@@ -1,6 +1,5 @@
 import pickle
 import numpy as np
-from quantizer import quantize_params
 
 def reduce_params(params):
     idx = params['pis'] > 0
@@ -27,7 +26,7 @@ def save_model(smoe, path, best=False, reduce=True, quantize=False):
     cp = {'params': params, 'mses': mses, 'losses': losses, 'num_pis': num_pis}
 
     if quantize:
-        qparams = quantize_params(params)
+        qparams = smoe.qparams
         qparams.update({'dim_of_domain': smoe.dim_domain})
         qparams.update({'dim_of_output': smoe.image.shape[-1]})
         qparams.update({'shape_of_img': smoe.image.shape[:-1]})

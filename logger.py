@@ -26,12 +26,16 @@ class ModelLogger:
     def log(self, smoe, checkpoint_iter=100):
         iter_ = smoe.get_iter()
         reconstruction = smoe.get_reconstruction()
+        if smoe.quantization_mode == 1:
+            qreconstruction = smoe.get_qreconstruction()
 
-        save_model(smoe, self.params_path + "/{0:08d}_params.pkl".format(iter_), best=False, reduce=True, quantize=True)
+        save_model(smoe, self.params_path + "/{0:08d}_params.pkl".format(iter_), best=False, reduce=True, quantize=True if smoe.quantization_mode == 1 else False)
 
         if self.as_media:
             if smoe.dim_domain == 2:
                 plt.imsave(self.reconstruction_path + "/{0:08d}_reconstruction.png".format(iter_), reconstruction, cmap='gray', vmin=0, vmax=1)
+                if smoe.quantization_mode == 1:
+                    plt.imsave(self.reconstruction_path + "/{0:08d}_qreconstruction.png".format(iter_), qreconstruction, cmap='gray', vmin=0, vmax=1)
             elif smoe.dim_domain == 3:
                 out = cv2.VideoWriter(self.reconstruction_path + "/{0:08d}_reconstruction.yuv".format(iter_), cv2.VideoWriter_fourcc(*'I420'), 25, (reconstruction.shape[0:2]))
                 for ii in range(reconstruction.shape[2]):
@@ -39,8 +43,18 @@ class ModelLogger:
                     frame = np.uint8(np.round(frame * 255))
                     out.write(frame)
                 out.release()
+
+                if smoe.quantization_mode == 1:
+                    out = cv2.VideoWriter(self.reconstruction_path + "/{0:08d}_qreconstruction.yuv".format(iter_), cv2.VideoWriter_fourcc(*'I420'), 25, (qreconstruction.shape[0:2]))
+                    for ii in range(qreconstruction.shape[2]):
+                        frame = np.squeeze(qreconstruction[:, :, ii, :])
+                        frame = np.uint8(np.round(frame * 255))
+                        out.write(frame)
+                    out.release()
         else:
             np.save(self.reconstruction_path + "/{0:08d}_reconstruction.npy".format(iter_), reconstruction)
+            if smoe.quantization_mode == 1:
+                np.save(self.reconstruction_path + "/{0:08d}_qreconstruction.npy".format(iter_), qreconstruction)
 
         if iter_ % checkpoint_iter == 0:
             smoe.checkpoint(self.checkpoints_path + "/{0:08d}_model.ckpt".format(iter_))

@@ -176,6 +176,9 @@ class LossPlotter:
 
         self.ax_pis.spines['right'].set_position(('outward', 50))
 
+        if smoe.quantization_mode == 1:
+            _, qlosses = zip(*smoe.get_qlosses())
+            _, qmses = zip(*smoe.get_qmses())
         iters_loss, losses = zip(*smoe.get_losses())
         iters_mse, mses = zip(*smoe.get_mses())
         iters_pis, pis = zip(*smoe.get_num_pis())
@@ -201,6 +204,9 @@ class LossPlotter:
         )
         self.ax_loss.plot(iters_loss, losses, color='b')
         self.ax_mse.plot(iters_mse, mses, color='r')
+        if smoe.quantization_mode == 1:
+            self.ax_loss.plot(iters_loss, qlosses, color='b', linestyle='--')
+            self.ax_mse.plot(iters_mse, qmses, color='r', linestyle='--')
         self.ax_pis.plot(iters_pis, pis, color='gray')
 
         if self.path:

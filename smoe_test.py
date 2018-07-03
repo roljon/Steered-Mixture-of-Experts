@@ -17,7 +17,10 @@ from utils import save_model, load_params
 
 
 def main(image_path, results_path, iterations, validation_iterations, kernels_per_dim, params_file, l1reg, base_lr,
-         batches, checkpoint_path, lr_div, lr_mult, disable_train_pis, disable_train_gammas, radial_as, use_determinant):
+         batches, checkpoint_path, lr_div, lr_mult, disable_train_pis, disable_train_gammas, radial_as, use_determinant, quantization_mode, bit_depths):
+
+    if len(bit_depths) != 5:
+        raise ValueError("Number of bit depths must be five!")
 
     if image_path.lower().endswith(('.png', '.tif', '.tiff', '.pgm', '.ppm', '.jpg', '.jpeg')):
         orig = plt.imread(image_path)
@@ -62,7 +65,7 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
 
     smoe = Smoe(orig, kernels_per_dim, init_params=init_params, train_pis=not disable_train_pis,
                 train_gammas=not disable_train_gammas, radial_as=radial_as, start_batches=batches,
-                use_determinant=use_determinant)
+                use_determinant=use_determinant, quantization_mode=quantization_mode, bit_depths=bit_depths)
 
     optimizer1 = tf.train.AdamOptimizer(base_lr)
     optimizer2 = tf.train.AdamOptimizer(base_lr/lr_div)
@@ -86,7 +89,7 @@ if __name__ == '__main__':
     parser.add_argument('-r', '--results_path', type=str, required=True, help="results path")
     parser.add_argument('-n', '--iterations', type=int, default=10000, help="number of iterations")
     parser.add_argument('-v', '--validation_iterations', type=int, default=100, help="number of iterations between validations")
-    parser.add_argument('-k', '--kernels_per_dim', type=int, default=12, nargs='+', help="number of kernels per dimension")
+    parser.add_argument('-k', '--kernels_per_dim', type=int, default=[12], nargs='+', help="number of kernels per dimension")
     parser.add_argument('-p', '--params_file', type=str, default=None, help="parameter file for model initialization")
     parser.add_argument('-reg', '--l1reg', type=float, default=0, help="l1 regularization for pis")
     parser.add_argument('-lr', '--base_lr', type=float, default=0.001, help="base learning rate")
@@ -99,6 +102,12 @@ if __name__ == '__main__':
     parser.add_argument('-dg', '--disable_train_gammas', type=bool, default=False, help="disable_train_gammas")
     parser.add_argument('-ra', '--radial_as', type=bool, default=False, help="radial_as")
     parser.add_argument('-ud', '--use_determinant', type=bool, default=True, help="use determinants for gaussian normalization")
+
+    parser.add_argument('-qm', '--quantization_mode', type=int, default=0,
+                        help="Quantization mode: 0 - no quantization, 1 - quantization each validation step,"
+                             " 2 - fake quantization optimization (not yet supported)")
+    parser.add_argument('-bd', '--bit_depths', type=int, default=[20, 18, 6, 10, 10], nargs='+',
+                        help="bit depths of each kind of parameter. number of numbers must be 5 in the order: A, musX, nu_e, pis, gamma_e")
 
     args = parser.parse_args()
 
