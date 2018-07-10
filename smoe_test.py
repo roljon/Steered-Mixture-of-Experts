@@ -80,6 +80,15 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
     save_model(smoe, results_path + "/params_best.pkl", best=True)
     save_model(smoe, results_path + "/params_last.pkl", best=False)
 
+def str2bool(v):
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--image_path', type=str, required=True, help="input image")
@@ -98,7 +107,8 @@ if __name__ == '__main__':
     parser.add_argument('-dp', '--disable_train_pis', type=bool, default=False, help="disable_train_pis")
     parser.add_argument('-dg', '--disable_train_gammas', type=bool, default=False, help="disable_train_gammas")
     parser.add_argument('-ra', '--radial_as', type=bool, default=False, help="radial_as")
-    parser.add_argument('-ud', '--use_determinant', type=bool, default=True, help="use determinants for gaussian normalization")
+    parser.add_argument('-ud', '--use_determinant', type=str2bool, nargs='?',
+                        const=True, default=True, help="use determinants for gaussian normalization")
 
     args = parser.parse_args()
 
