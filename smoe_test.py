@@ -110,9 +110,12 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--lr_div', type=float, default=100, help="div for pis lr")
     parser.add_argument('-m', '--lr_mult', type=float, default=1000, help="mult for a lr")
 
-    parser.add_argument('-dp', '--disable_train_pis', type=bool, default=False, help="disable_train_pis")
-    parser.add_argument('-dg', '--disable_train_gammas', type=bool, default=False, help="disable_train_gammas")
-    parser.add_argument('-ra', '--radial_as', type=bool, default=False, help="radial_as")
+    parser.add_argument('-dp', '--disable_train_pis', type=str2bool, nargs='?',
+                        const=False, default=False, help="disable_train_pis")
+    parser.add_argument('-dg', '--disable_train_gammas', type=str2bool, nargs='?',
+                        const=False, default=False, help="disable_train_gammas")
+    parser.add_argument('-ra', '--radial_as', type=str2bool, nargs='?',
+                        const=False, default=False, help="radial_as")
     parser.add_argument('-ud', '--use_determinant', type=str2bool, nargs='?',
                         const=True, default=True, help="use determinants for gaussian normalization")
     parser.add_argument('-np', '--normalize_pis', type=str2bool, nargs='?',

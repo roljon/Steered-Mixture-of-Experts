@@ -32,9 +32,9 @@ def save_model(smoe, path, best=False, reduce=True, quantize=False):
         qparams.update({'shape_of_img': smoe.image.shape[:-1]})
         qparams.update({'used_ranges': False})
         qparams.update({'quantized_tria_params': True})
-        # trained_gamma_flag
-        # radial_as_flag
-        # trained_pis_flag
+        qparams.update({'trained_gamma': smoe.train_gammas})
+        qparams.update({'radial_as': smoe.radial_as})
+        qparams.update({'trained_pis': smoe.train_pis})
         cp.update({'qparams': qparams})
 
     with open(path, 'wb') as fd:

@@ -88,6 +88,9 @@ class Smoe:
         self.weight_matrix_argmax = None
         self.qreconstruction_image = None
         self.qweight_matrix_argmax = None
+        self.train_pis = train_pis
+        self.train_gammas = train_gammas
+        self.radial_as = radial_as
         self.quantization_mode = quantization_mode
         self.bit_depths = bit_depths
 
