@@ -83,6 +83,13 @@ def rescaler(smoe, qparams):
     rpis = qpis / step_pis * (ub_pis - lb_pis) + lb_pis
     rgamma_e = qgamma_e / step_gamma_e * (ub_gamma_e - lb_gamma_e) + lb_gamma_e
 
+    if smoe.radial_as:
+        A_mask = np.zeros((len(rA), smoe.dim_domain, smoe.dim_domain))
+        for ii in range(A_mask.shape[0]):
+            np.fill_diagonal(A_mask[ii, :, :], rA[ii])
+        rA = A_mask
+
+
     rparams = {'A': rA, 'musX': rmusX, 'nu_e': rnu_e, 'pis': rpis, 'gamma_e': rgamma_e}
 
     return rparams
