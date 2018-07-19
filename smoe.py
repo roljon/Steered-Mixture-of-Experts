@@ -8,8 +8,8 @@ from quantizer import quantize_params, rescaler
 
 class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1,
-                 train_gammas=True, radial_as=False, use_determinant=True, quantization_mode=0, bit_depths=None,
-                 iter_offset=0, margin=0.5):
+                 train_gammas=True, radial_as=False, use_determinant=True, normalize_pis=True, quantization_mode=0,
+                 bit_depths=None, iter_offset=0, margin=0.5):
         self.batch_shape = None
 
         # init params
@@ -114,7 +114,7 @@ class Smoe:
         else:
             self.generate_kernel_grid(kernels_per_dim)
             self.generate_experts()
-            self.generate_pis()
+            self.generate_pis(normalize_pis)
 
         self.start_pis = self.pis_init.size
         self.margin = margin
@@ -655,9 +655,12 @@ class Smoe:
 
         self.nu_e_init = mean
 
-    def generate_pis(self):
+    def generate_pis(self, normalize_pis):
         number = self.musX_init.shape[0]
-        self.pis_init = np.ones((number,), dtype=np.float32) / number
+        if normalize_pis:
+            self.pis_init = np.ones((number,), dtype=np.float32) / number
+        else:
+            self.pis_init = np.ones((number,), dtype=np.float32)
 
     @staticmethod
     def gen_domain(in_, dim_of_input_space=2):
