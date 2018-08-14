@@ -18,10 +18,15 @@ from utils import save_model, load_params
 
 def main(image_path, results_path, iterations, validation_iterations, kernels_per_dim, params_file, l1reg, base_lr,
          batches, checkpoint_path, lr_div, lr_mult, disable_train_pis, disable_train_gammas, radial_as, use_determinant,
-         normalize_pis, quantization_mode, bit_depths):
+         normalize_pis, quantization_mode, bit_depths, quantize_pis, lower_bounds, upper_bounds):
 
     if len(bit_depths) != 5:
         raise ValueError("Number of bit depths must be five!")
+
+    if quantization_mode == 2:
+        quantize_pis = True
+    elif quantization_mode == 0:
+        quantize_pis = False
 
     if image_path.lower().endswith(('.png', '.tif', '.tiff', '.pgm', '.ppm', '.jpg', '.jpeg')):
         orig = plt.imread(image_path)
@@ -66,8 +71,8 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
 
     smoe = Smoe(orig, kernels_per_dim, init_params=init_params, train_pis=not disable_train_pis,
                 train_gammas=not disable_train_gammas, radial_as=radial_as, start_batches=batches,
-                use_determinant=use_determinant, normalize_pis=normalize_pis,
-                quantization_mode=quantization_mode, bit_depths=bit_depths)
+                use_determinant=use_determinant, normalize_pis=normalize_pis, quantization_mode=quantization_mode,
+                bit_depths=bit_depths, quantize_pis=quantize_pis, lower_bounds=lower_bounds, upper_bounds=upper_bounds)
 
 
     optimizer1 = tf.train.AdamOptimizer(base_lr)
@@ -123,9 +128,15 @@ if __name__ == '__main__':
 
     parser.add_argument('-qm', '--quantization_mode', type=int, default=0,
                         help="Quantization mode: 0 - no quantization, 1 - quantization each validation step,"
-                             " 2 - fake quantization optimization (not yet supported)")
+                             " 2 - fake quantization optimization")
     parser.add_argument('-bd', '--bit_depths', type=int, default=[20, 18, 6, 10, 10], nargs='+',
                         help="bit depths of each kind of parameter. number of numbers must be 5 in the order: A, musX, nu_e, pis, gamma_e")
+    parser.add_argument('-qp', '--quantize_pis', type=str2bool, nargs='?',
+                        const=True, default=True, help="Quantize Pis while optimization (only valid for quantization mode 1, for quantization mode 2 always True)")
+    parser.add_argument('-lb', '--lower_bounds', type=float, default=[-2500, -.3, -5, 0, -32], nargs='+',
+                        help="lower bounds of parameters for quantization while optimization")
+    parser.add_argument('-ub', '--upper_bounds', type=float, default=[2500, 1.3, 5, 2, 32], nargs='+',
+                        help="upper bounds of parameters for quantization while optimization")
 
     args = parser.parse_args()
 

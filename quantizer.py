@@ -5,40 +5,63 @@ def quantize_params(smoe, params):
 
     params = reduce_params(params)
 
-    # TODO add oppptortunity of quantizing the entries of symmetric matrix A*A.T
-    step_A = 2 ** smoe.bit_depths[0] - 1
-    lb_A = np.amin(params['A'], axis=0, keepdims=True)
-    ub_A = np.amax(params['A'], axis=0, keepdims=True)
-    normalized = (params['A'] - lb_A) / (ub_A - lb_A + 10e-12)
-    qA = np.round(normalized * step_A)
+    if smoe.quantization_mode == 1:
+        lb_A = np.amin(params['A'], axis=0, keepdims=True)
+        ub_A = np.amax(params['A'], axis=0, keepdims=True)
+        lb_musX = np.amin(params['musX'], axis=0, keepdims=True)
+        ub_musX = np.amax(params['musX'], axis=0, keepdims=True)
+        lb_nu_e = np.amin(params['nu_e'], axis=0, keepdims=True)
+        ub_nu_e = np.amax(params['nu_e'], axis=0, keepdims=True)
+        lb_gamma_e = np.amin(params['gamma_e'], axis=0, keepdims=True)
+        ub_gamma_e = np.amax(params['gamma_e'], axis=0, keepdims=True)
+    elif smoe.quantization_mode == 2:
+        if smoe.radial_as:
+            lb_A = np.ones((1,)) * smoe.lower_bounds[0]
+            ub_A = np.ones((1,)) * smoe.upper_bounds[0]
+        else:
+            lb_A = np.ones((1, smoe.dim_domain, smoe.dim_domain)) * smoe.lower_bounds[0]
+            ub_A = np.ones((1, smoe.dim_domain, smoe.dim_domain)) * smoe.upper_bounds[0]
+        lb_musX = np.ones((1, smoe.dim_domain)) * smoe.lower_bounds[1]
+        ub_musX = np.ones((1, smoe.dim_domain)) * smoe.upper_bounds[1]
+        lb_nu_e = np.ones((1, smoe.image.shape[-1])) * smoe.lower_bounds[2]
+        ub_nu_e = np.ones((1, smoe.image.shape[-1])) * smoe.upper_bounds[2]
+        lb_gamma_e = np.ones((1, smoe.dim_domain, smoe.image.shape[-1])) * smoe.lower_bounds[4]
+        ub_gamma_e = np.ones((1, smoe.dim_domain, smoe.image.shape[-1])) * smoe.upper_bounds[4]
 
-    step_musX = 2 ** smoe.bit_depths[1] - 1
-    lb_musX = np.amin(params['musX'], axis=0, keepdims=True)
-    ub_musX = np.amax(params['musX'], axis=0, keepdims=True)
-    normalized = (params['musX'] - lb_musX) / (ub_musX - lb_musX + 10e-12)
-    qmusX = np.round(normalized * step_musX)
-
-    step_nu_e = 2 ** smoe.bit_depths[2] - 1
-    lb_nu_e = np.amin(params['nu_e'], axis=0, keepdims=True)
-    ub_nu_e = np.amax(params['nu_e'], axis=0, keepdims=True)
-    normalized = (params['nu_e'] - lb_nu_e) / (ub_nu_e - lb_nu_e + 10e-12)
-    qnu_e = np.round(normalized * step_nu_e)
-
-    step_pis = 2 ** smoe.bit_depths[3] - 1
-    lb_pis = np.amin(params['pis'], axis=0, keepdims=True)
-    ub_pis = np.amax(params['pis'], axis=0, keepdims=True)
-    normalized = (params['pis'] - lb_pis) / (ub_pis - lb_pis + 10e-12)
-    qpis = np.round(normalized * step_pis)
-
-    step_gamma_e = 2 ** smoe.bit_depths[4] - 1
-    lb_gamma_e = np.amin(params['gamma_e'], axis=0, keepdims=True)
-    ub_gamma_e = np.amax(params['gamma_e'], axis=0, keepdims=True)
-    normalized = (params['gamma_e'] - lb_gamma_e) / (ub_gamma_e - lb_gamma_e + 10e-12)
-    qgamma_e = np.round(normalized * step_gamma_e)
+    if smoe.quantization_mode == 1 and not smoe.quantize_pis:
+        lb_pis = np.amin(params['pis'], axis=0, keepdims=True)
+        ub_pis = np.amax(params['pis'], axis=0, keepdims=True)
+    elif smoe.quantization_mode == 2 or (smoe.quantization_mode == 1 and smoe.quantize_pis):
+        lb_pis = np.ones((1,)) * smoe.lower_bounds[3]
+        ub_pis = np.ones((1,)) * smoe.upper_bounds[3]
 
     lower_bounds = {'A': lb_A, 'musX': lb_musX, 'nu_e': lb_nu_e, 'pis': lb_pis, 'gamma_e': lb_gamma_e}
     upper_bounds = {'A': ub_A, 'musX': ub_musX, 'nu_e': ub_nu_e, 'pis': ub_pis, 'gamma_e': ub_gamma_e}
+
+    step_A = 2 ** smoe.bit_depths[0] - 1
+    step_musX = 2 ** smoe.bit_depths[1] - 1
+    step_nu_e = 2 ** smoe.bit_depths[2] - 1
+    step_pis = 2 ** smoe.bit_depths[3] - 1
+    step_gamma_e = 2 ** smoe.bit_depths[4] - 1
     steps = {'A': step_A, 'musX': step_musX, 'nu_e': step_nu_e, 'pis': step_pis, 'gamma_e': step_gamma_e}
+
+
+    # TODO add oppptortunity of quantizing the entries of symmetric matrix A*A.T
+    normalized = (params['A'] - lb_A) / (ub_A - lb_A + 10e-12)
+    qA = np.round(normalized * step_A)
+
+    normalized = (params['musX'] - lb_musX) / (ub_musX - lb_musX + 10e-12)
+    qmusX = np.round(normalized * step_musX)
+
+    normalized = (params['nu_e'] - lb_nu_e) / (ub_nu_e - lb_nu_e + 10e-12)
+    qnu_e = np.round(normalized * step_nu_e)
+
+    normalized = (params['pis'] - lb_pis) / (ub_pis - lb_pis + 10e-12)
+    qpis = np.round(normalized * step_pis)
+
+    normalized = (params['gamma_e'] - lb_gamma_e) / (ub_gamma_e - lb_gamma_e + 10e-12)
+    qgamma_e = np.round(normalized * step_gamma_e)
+
     qparams = {'lower_bounds': lower_bounds, 'upper_bounds': upper_bounds, 'steps': steps,
                'A': qA, 'musX': qmusX, 'nu_e': qnu_e, 'pis': qpis, 'gamma_e': qgamma_e}
 

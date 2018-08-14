@@ -29,7 +29,8 @@ class ModelLogger:
         if smoe.quantization_mode == 1:
             qreconstruction = smoe.get_qreconstruction()
 
-        save_model(smoe, self.params_path + "/{0:08d}_params.pkl".format(iter_), best=False, reduce=True, quantize=True if smoe.quantization_mode == 1 else False)
+        save_model(smoe, self.params_path + "/{0:08d}_params.pkl".format(iter_), best=False, reduce=True,
+                   quantize=True if (smoe.quantization_mode == 1 or smoe.quantization_mode == 2) else False)
 
         if self.as_media:
             if smoe.dim_domain == 2:

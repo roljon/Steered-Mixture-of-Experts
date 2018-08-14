@@ -9,7 +9,7 @@ from quantizer import quantize_params, rescaler
 class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1,
                  train_gammas=True, radial_as=False, use_determinant=True, normalize_pis=True, quantization_mode=0,
-                 bit_depths=None, iter_offset=0, margin=0.5):
+                 bit_depths=None, quantize_pis=True, lower_bounds=None, upper_bounds=None, iter_offset=0, margin=0.5):
         self.batch_shape = None
 
         # init params
@@ -61,6 +61,12 @@ class Smoe:
         self.gamma_e = None
         self.A = None
         self.pis = None
+        # tf ops - quant variable
+        self.qA = None
+        self.qmusX = None
+        self.qnu_e = None
+        self.qgamma_e = None
+        self.qpis = None
 
         # optimizers
         self.optimizer1 = None
@@ -93,6 +99,9 @@ class Smoe:
         self.radial_as = radial_as
         self.quantization_mode = quantization_mode
         self.bit_depths = bit_depths
+        self.quantize_pis = quantize_pis
+        self.lower_bounds = lower_bounds
+        self.upper_bounds = upper_bounds
 
         # generate initializations
         self.start_batches = start_batches  # start_batches corresponds to desired batch numbers
@@ -151,6 +160,30 @@ class Smoe:
         else:
             self.A_var = tf.Variable(A_init, dtype=tf.float32)
 
+        # Quantization of parameters (if requested)
+        if self.quantization_mode == 2:
+            self.qA = tf.fake_quant_with_min_max_args(self.A_var, min=self.lower_bounds[0],
+                                                      max=self.upper_bounds[0], num_bits=self.bit_depths[0])
+            self.qmusX = tf.fake_quant_with_min_max_args(self.musX_var,
+                                                         min=self.lower_bounds[1], max=self.upper_bounds[1],
+                                                         num_bits=self.bit_depths[1])
+            self.qnu_e = tf.fake_quant_with_min_max_args(self.nu_e_var,
+                                                         min=self.lower_bounds[2], max=self.upper_bounds[2],
+                                                         num_bits=self.bit_depths[2])
+            self.qgamma_e = tf.fake_quant_with_min_max_args(self.gamma_e_var,
+                                                            min=self.lower_bounds[4], max=self.upper_bounds[4],
+                                                            num_bits=self.bit_depths[4])
+        else:
+            self.qA = self.A_var
+            self.qmusX = self.musX_var
+            self.qnu_e = self.nu_e_var
+            self.qgamma_e = self.gamma_e_var
+
+        if self.quantization_mode == 2 or (self.quantization_mode == 1 and self.quantize_pis):
+            self.qpis = tf.fake_quant_with_min_max_args(self.pis_var, min=self.lower_bounds[3],
+                                                        max=self.upper_bounds[3], num_bits=self.bit_depths[3])
+        else:
+            self.qpis = self.pis_var
 
         num_channels = gamma_e_init.shape[-1]
 
@@ -174,13 +207,13 @@ class Smoe:
            A_mask = np.zeros((self.dim_domain, self.dim_domain))
            np.fill_diagonal(A_mask, 1)
            A_mask = np.tile(A_mask, (A_init.shape[0], 1, 1))
-           A = tf.tile(tf.expand_dims(tf.expand_dims(self.A_var, axis=-1), axis=-1), (1, self.dim_domain, self.dim_domain))
+           A = tf.tile(tf.expand_dims(tf.expand_dims(self.qA, axis=-1), axis=-1), (1, self.dim_domain, self.dim_domain))
            A = A * A_mask
         else:
-           A = self.A_var
+           A = self.qA
 
 
-        pis_mask = self.pis_var > 0
+        pis_mask = self.qpis > 0
         bool_mask = tf.logical_and(self.kernel_list, pis_mask)
 
         # track indices of used and necessary kernels
@@ -188,11 +221,12 @@ class Smoe:
         self.indices = tf.boolean_mask(self.indices, bool_mask)
 
         # using self-Variables to define feed point
-        self.musX = tf.boolean_mask(self.musX_var, bool_mask)
-        self.nu_e = tf.boolean_mask(self.nu_e_var, bool_mask)
-        self.gamma_e = tf.boolean_mask(self.gamma_e_var, bool_mask)
+        self.musX = tf.boolean_mask(self.qmusX, bool_mask)
+        self.nu_e = tf.boolean_mask(self.qnu_e, bool_mask)
+        self.gamma_e = tf.boolean_mask(self.qgamma_e, bool_mask)
         self.A = tf.boolean_mask(A, bool_mask)
-        self.pis = tf.boolean_mask(self.pis_var, bool_mask)
+        self.pis = tf.boolean_mask(self.qpis, bool_mask)
+
 
         musX = self.musX
         nu_e = self.nu_e
@@ -362,8 +396,9 @@ class Smoe:
         # self.losses = []
         # self.mses = []
         # self.num_pis = []
-        if self.quantization_mode == 1:
+        if self.quantization_mode == 1 or self.quantization_mode == 2:
             self.qparams = quantize_params(self, self.get_params())
+        if self.quantization_mode == 1:
             self.rparams = rescaler(self, self.qparams)
             self.best_qloss, self.best_qmse, _ = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=False, update_reconstruction=True,
                                        with_quantized_params=True)
@@ -391,12 +426,14 @@ class Smoe:
                                                              update_reconstruction=False)
 
                 if validate:
-                    if self.quantization_mode == 1:
+                    if self.quantization_mode == 1 or self.quantization_mode == 2:
                         self.qparams = quantize_params(self, self.get_params())
+                    if self.quantization_mode == 1:
                         self.rparams = rescaler(self, self.qparams)
                         self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches
-                        qloss_val, qmse_val, _ = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=False,
-                                                                     update_reconstruction=True, with_quantized_params=True)
+                        qloss_val, qmse_val, _ = self.run_batched(pis_l1=pis_l1,
+                                                                  u_l1=u_l1, train=False, update_reconstruction=True,
+                                                                  with_quantized_params=True)
                     loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=False,
                                                                  update_reconstruction=True)
                     # run batched with quant params
@@ -512,8 +549,8 @@ class Smoe:
         return loss_val, mse_val, num_pi
 
     def get_params(self):
-        pis, musX, A, gamma_e, nu_e = self.session.run([self.pis_var, self.musX_var, self.A_var,
-                                                        self.gamma_e_var, self.nu_e_var])
+        pis, musX, A, gamma_e, nu_e = self.session.run([self.qpis, self.qmusX, self.qA,
+                                                        self.qgamma_e, self.qnu_e])
 
         out_dict = {'pis': pis, 'musX': musX, 'A': A, 'gamma_e': gamma_e, 'nu_e': nu_e}
         return out_dict
