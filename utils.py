@@ -24,7 +24,8 @@ def save_model(smoe, path, best=False, reduce=True, quantize=False):
     num_pis = smoe.get_num_pis()
 
     cp = {'params': params, 'mses': mses, 'losses': losses, 'num_pis': num_pis,
-          'quantization_mode': smoe.quantization_mode}
+          'quantization_mode': smoe.quantization_mode, 'quantized_pis': smoe.quantize_pis,
+          'lower_bounds': smoe.lower_bounds, 'upper_bounds': smoe.upper_bounds}
 
     if quantize:
         qparams = smoe.qparams

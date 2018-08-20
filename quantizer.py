@@ -5,7 +5,7 @@ def quantize_params(smoe, params):
 
     params = reduce_params(params)
 
-    if smoe.quantization_mode == 1:
+    if smoe.quantization_mode <= 1:
         lb_A = np.amin(params['A'], axis=0, keepdims=True)
         ub_A = np.amax(params['A'], axis=0, keepdims=True)
         lb_musX = np.amin(params['musX'], axis=0, keepdims=True)
@@ -28,10 +28,10 @@ def quantize_params(smoe, params):
         lb_gamma_e = np.ones((1, smoe.dim_domain, smoe.image.shape[-1])) * smoe.lower_bounds[4]
         ub_gamma_e = np.ones((1, smoe.dim_domain, smoe.image.shape[-1])) * smoe.upper_bounds[4]
 
-    if smoe.quantization_mode == 1 and not smoe.quantize_pis:
+    if smoe.quantization_mode <= 1 and not smoe.quantize_pis:
         lb_pis = np.amin(params['pis'], axis=0, keepdims=True)
         ub_pis = np.amax(params['pis'], axis=0, keepdims=True)
-    elif smoe.quantization_mode == 2 or (smoe.quantization_mode == 1 and smoe.quantize_pis):
+    elif smoe.quantization_mode == 2 or smoe.quantize_pis:
         lb_pis = np.ones((1,)) * smoe.lower_bounds[3]
         ub_pis = np.ones((1,)) * smoe.upper_bounds[3]
 

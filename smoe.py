@@ -8,7 +8,7 @@ from quantizer import quantize_params, rescaler
 
 class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1,
-                 train_gammas=True, radial_as=False, use_determinant=True, normalize_pis=True, quantization_mode=0,
+                 train_gammas=True, radial_as=False, use_determinant=False, normalize_pis=True, quantization_mode=0,
                  bit_depths=None, quantize_pis=True, lower_bounds=None, upper_bounds=None, iter_offset=0, margin=0.5):
         self.batch_shape = None
 
@@ -139,7 +139,7 @@ class Smoe:
         self.init_model(self.joint_domain_batched, self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init,
                         train_pis, train_gammas, radial_as, use_determinant)
 
-    def init_model(self, joint_domain_batched, nu_e_init, gamma_e_init, pis_init, musX_init, A_init, train_pis=True, train_gammas=True, radial_as=False, use_determinant=True):
+    def init_model(self, joint_domain_batched, nu_e_init, gamma_e_init, pis_init, musX_init, A_init, train_pis=True, train_gammas=True, radial_as=False, use_determinant=False):
 
         self.nu_e_var = tf.Variable(nu_e_init, dtype=tf.float32)
         self.gamma_e_var = tf.Variable(gamma_e_init, trainable=train_gammas, dtype=tf.float32)
