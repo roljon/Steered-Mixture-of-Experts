@@ -8,17 +8,17 @@ import numpy as np
 import tensorflow as tf
 import os
 import shutil
-import cv2
+
 
 from smoe import Smoe
 from plotter import ImagePlotter, LossPlotter
 from logger import ModelLogger
-from utils import save_model, load_params
+from utils import save_model, load_params, read_image
 
 
 def main(image_path, results_path, iterations, validation_iterations, kernels_per_dim, params_file, l1reg, base_lr,
          batches, checkpoint_path, lr_div, lr_mult, disable_train_pis, disable_train_gammas, radial_as, use_determinant,
-         normalize_pis, quantization_mode, bit_depths, quantize_pis, lower_bounds, upper_bounds):
+         normalize_pis, quantization_mode, bit_depths, quantize_pis, lower_bounds, upper_bounds, use_yuv):
 
     if len(bit_depths) != 5:
         raise ValueError("Number of bit depths must be five!")
@@ -28,32 +28,7 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
     elif quantization_mode == 0:
         quantize_pis = False
 
-    if image_path.lower().endswith(('.png', '.tif', '.tiff', '.pgm', '.ppm', '.jpg', '.jpeg')):
-        orig = plt.imread(image_path)
-        if orig.ndim == 2:
-            orig = np.expand_dims(orig, axis=-1)
-        if orig.dtype == np.uint8:
-            orig = orig.astype(np.float32) / 255.
-    elif image_path.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.flv')):
-        # TODO expand dimension in case of grayscale video
-        cap = cv2.VideoCapture(image_path)
-        num_of_frames = np.array(cap.get(7), dtype=np.int32)
-        height = np.array(cap.get(3), dtype=np.int32)
-        width = np.array(cap.get(4), dtype=np.int32)
-        orig = np.empty((width, height, num_of_frames, 3))
-        idx_frame = np.array(0, dtype=np.int32)
-        while(idx_frame < num_of_frames):
-            ret, curr_frame = cap.read()
-            #curr_frame = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
-            orig[:, :, idx_frame, :] = curr_frame
-            idx_frame += 1
-        orig = orig.astype(np.float32) / 255.
-
-    elif image_path.lower().endswith('.yuv'):
-        # TODO read raw video by OpenCV
-        raise ValueError("Raw Video Data is not supported yet!")
-    else:
-        raise ValueError("Unknown data format")
+    orig = read_image(image_path, use_yuv)
 
     if params_file is not None:
         init_params = load_params(params_file)
@@ -74,6 +49,10 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
                 use_determinant=use_determinant, normalize_pis=normalize_pis, quantization_mode=quantization_mode,
                 bit_depths=bit_depths, quantize_pis=quantize_pis, lower_bounds=lower_bounds, upper_bounds=upper_bounds)
 
+    if orig.shape[-1] == 3:
+        smoe.use_yuv = use_yuv
+    else:
+        smoe.use_yuv = False
 
     optimizer1 = tf.train.AdamOptimizer(base_lr)
     optimizer2 = tf.train.AdamOptimizer(base_lr/lr_div)
@@ -137,6 +116,10 @@ if __name__ == '__main__':
                         help="lower bounds of parameters for quantization while optimization")
     parser.add_argument('-ub', '--upper_bounds', type=float, default=[2500, 1.3, 5, 2, 32], nargs='+',
                         help="upper bounds of parameters for quantization while optimization")
+
+    parser.add_argument('-yuv', '--use_yuv', type=str2bool, nargs='?',
+                        const=True, default=True, help="uses YUV color space for modeling if three channels are provided.")
+
 
     args = parser.parse_args()
 

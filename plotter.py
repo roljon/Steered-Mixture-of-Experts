@@ -6,6 +6,7 @@ from matplotlib.gridspec import GridSpec
 import numpy as np
 import os
 import glob
+import cv2
 
 mpl.rcParams['image.cmap'] = 'jet'
 
@@ -83,17 +84,25 @@ class ImagePlotter:
                 img = smoe.get_original_image()
                 if smoe.dim_domain == 3:
                     if img.ndim == 4:
-                        img = img[:, :, 0, ::-1]
+                        img = img[:, :, 0, :]
                     else:
                         img = img[:, :, 0]
+                if img.ndim == 3 and smoe.use_yuv:
+                    img = cv2.cvtColor(np.uint8(np.round(img * 255)), cv2.COLOR_YUV2RGB)
+                elif img.ndim == 3 and not smoe.use_yuv:
+                    img = img[:, :, ::-1]
                 ax.imshow(img, cmap='gray', interpolation='None', vmin=0, vmax=1)
             elif option == "reconstruction":
-                img = smoe.get_reconstruction()
+                img = np.squeeze(smoe.get_reconstruction())
                 if smoe.dim_domain == 3:
                     if img.ndim == 4:
-                        img = img[:, :, 0, ::-1]
+                        img = img[:, :, 0, :]
                     else:
                         img = img[:, :, 0]
+                if img.ndim == 3 and smoe.use_yuv:
+                    img = cv2.cvtColor(np.uint8(np.round(img * 255)), cv2.COLOR_YUV2RGB)
+                elif img.ndim == 3 and not smoe.use_yuv:
+                    img = img[:, :, ::-1]
                 ax.imshow(img, cmap='gray', interpolation='None', vmin=0, vmax=1)
             elif option == "gating":
                 w_e_opt = smoe.get_weight_matrix_argmax()

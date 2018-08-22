@@ -4,15 +4,12 @@ import matplotlib as mpl
 mpl.use('Agg')
 
 import pickle
-import matplotlib.pyplot as plt
-import numpy as np
 import os
 import shutil
-import cv2
 import re
 
 from smoe import Smoe
-from utils import save_model, load_params
+from utils import save_model, load_params, read_image, write_image
 from quantizer import quantize_params, rescaler
 
 def main(image_path, results_path, params_file, batches, bit_depths, quant_params):
@@ -20,33 +17,7 @@ def main(image_path, results_path, params_file, batches, bit_depths, quant_param
     if len(bit_depths) != 5:
         raise ValueError("Number of bit depths must be five!")
 
-
-    if image_path.lower().endswith(('.png', '.tif', '.tiff', '.pgm', '.ppm', '.jpg', '.jpeg')):
-        orig = plt.imread(image_path)
-        if orig.ndim == 2:
-            orig = np.expand_dims(orig, axis=-1)
-        if orig.dtype == np.uint8:
-            orig = orig.astype(np.float32) / 255.
-    elif image_path.lower().endswith(('.mp4', '.avi', '.mov', '.mkv', '.flv')):
-        # TODO expand dimension in case of grayscale video
-        cap = cv2.VideoCapture(image_path)
-        num_of_frames = np.array(cap.get(7), dtype=np.int32)
-        height = np.array(cap.get(3), dtype=np.int32)
-        width = np.array(cap.get(4), dtype=np.int32)
-        orig = np.empty((width, height, num_of_frames, 3))
-        idx_frame = np.array(0, dtype=np.int32)
-        while(idx_frame < num_of_frames):
-            ret, curr_frame = cap.read()
-            #curr_frame = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
-            orig[:, :, idx_frame, :] = curr_frame
-            idx_frame += 1
-        orig = orig.astype(np.float32) / 255.
-
-    elif image_path.lower().endswith('.yuv'):
-        # TODO read raw video by OpenCV
-        raise ValueError("Raw Video Data is not supported yet!")
-    else:
-        raise ValueError("Unknown data format")
+    orig = read_image(image_path)
 
     init_params = load_params(params_file)
 
@@ -64,10 +35,12 @@ def main(image_path, results_path, params_file, batches, bit_depths, quant_param
         smoe.quantize_pis = cp.get('quantized_pis')
         smoe.lower_bounds = cp.get('lower_bounds')
         smoe.upper_bounds = cp.get('upper_bounds')
+        smoe.use_yuv = cp.get('use_yuv')
 
     if smoe.quantization_mode is None:
         smoe.quantization_mode = 0
         smoe.quantize_pis = False
+        smoe.use_yuv = False
 
 
     if smoe.quantization_mode <= 0 and quant_params:
@@ -103,17 +76,7 @@ def main(image_path, results_path, params_file, batches, bit_depths, quant_param
     else:
         reconstruction = smoe.get_reconstruction()
 
-    if smoe.dim_domain == 2:
-        plt.imsave(reconstruction_path + ".png", reconstruction, cmap='gray',
-                   vmin=0, vmax=1)
-    elif smoe.dim_domain == 3:
-        out = cv2.VideoWriter(reconstruction_path + ".yuv",
-                              cv2.VideoWriter_fourcc(*'I420'), 25, (reconstruction.shape[0:2]))
-        for ii in range(reconstruction.shape[2]):
-            frame = np.squeeze(reconstruction[:, :, ii, :])
-            frame = np.uint8(np.round(frame * 255))
-            out.write(frame)
-        out.release()
+    write_image(reconstruction, reconstruction_path, smoe.dim_domain, smoe.use_yuv)
 
 def str2bool(v):
     if v.lower() in ('yes', 'true', 't', 'y', '1'):

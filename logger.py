@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import cv2
 import skvideo.io as skv
+from utils import write_image
 
 from utils import save_model
 
@@ -26,35 +27,19 @@ class ModelLogger:
     def log(self, smoe, checkpoint_iter=100):
         iter_ = smoe.get_iter()
         reconstruction = smoe.get_reconstruction()
-        if smoe.quantization_mode == 1:
-            qreconstruction = smoe.get_qreconstruction()
 
         save_model(smoe, self.params_path + "/{0:08d}_params.pkl".format(iter_), best=False, reduce=True,
                    quantize=True if (smoe.quantization_mode == 1 or smoe.quantization_mode == 2) else False)
 
         if self.as_media:
-            if smoe.dim_domain == 2:
-                plt.imsave(self.reconstruction_path + "/{0:08d}_reconstruction.png".format(iter_), reconstruction, cmap='gray', vmin=0, vmax=1)
-                if smoe.quantization_mode == 1:
-                    plt.imsave(self.reconstruction_path + "/{0:08d}_qreconstruction.png".format(iter_), qreconstruction, cmap='gray', vmin=0, vmax=1)
-            elif smoe.dim_domain == 3:
-                out = cv2.VideoWriter(self.reconstruction_path + "/{0:08d}_reconstruction.yuv".format(iter_), cv2.VideoWriter_fourcc(*'I420'), 25, (reconstruction.shape[0:2]))
-                for ii in range(reconstruction.shape[2]):
-                    frame = np.squeeze(reconstruction[:, :, ii, :])
-                    frame = np.uint8(np.round(frame * 255))
-                    out.write(frame)
-                out.release()
-
-                if smoe.quantization_mode == 1:
-                    out = cv2.VideoWriter(self.reconstruction_path + "/{0:08d}_qreconstruction.yuv".format(iter_), cv2.VideoWriter_fourcc(*'I420'), 25, (qreconstruction.shape[0:2]))
-                    for ii in range(qreconstruction.shape[2]):
-                        frame = np.squeeze(qreconstruction[:, :, ii, :])
-                        frame = np.uint8(np.round(frame * 255))
-                        out.write(frame)
-                    out.release()
+            write_image(reconstruction, self.reconstruction_path + "/{0:08d}_reconstruction".format(iter_), smoe.dim_domain, smoe.use_yuv)
+            if smoe.quantization_mode == 1:
+                qreconstruction = smoe.get_qreconstruction()
+                write_image(qreconstruction, self.reconstruction_path + "/{0:08d}_qreconstruction".format(iter_), smoe.dim_domain, smoe.use_yuv)
         else:
             np.save(self.reconstruction_path + "/{0:08d}_reconstruction.npy".format(iter_), reconstruction)
             if smoe.quantization_mode == 1:
+                qreconstruction = smoe.get_qreconstruction()
                 np.save(self.reconstruction_path + "/{0:08d}_qreconstruction.npy".format(iter_), qreconstruction)
 
         if iter_ % checkpoint_iter == 0:

@@ -11,6 +11,7 @@ class Smoe:
                  train_gammas=True, radial_as=False, use_determinant=False, normalize_pis=True, quantization_mode=0,
                  bit_depths=None, quantize_pis=True, lower_bounds=None, upper_bounds=None, iter_offset=0, margin=0.5):
         self.batch_shape = None
+        self.use_yuv = None
 
         # init params
         self.pis_init = None
@@ -561,12 +562,12 @@ class Smoe:
     def get_reconstruction(self):
         if not self.valid:
             self.run_batched(train=False, update_reconstruction=True)
-        return np.squeeze(self.reconstruction_image)
+        return self.reconstruction_image
 
     def get_qreconstruction(self):
         if not self.qvalid:
             self.run_batched(train=False, update_reconstruction=True, with_quantized_params=True)
-        return np.squeeze(self.qreconstruction_image)
+        return self.qreconstruction_image
 
     def get_weight_matrix_argmax(self):
         if not self.valid:
