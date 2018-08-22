@@ -180,7 +180,7 @@ class Smoe:
             self.qnu_e = self.nu_e_var
             self.qgamma_e = self.gamma_e_var
 
-        if self.quantization_mode == 2 or (self.quantization_mode == 1 and self.quantize_pis):
+        if self.quantization_mode == 2 or self.quantize_pis:
             self.qpis = tf.fake_quant_with_min_max_args(self.pis_var, min=self.lower_bounds[3],
                                                         max=self.upper_bounds[3], num_bits=self.bit_depths[3])
         else:

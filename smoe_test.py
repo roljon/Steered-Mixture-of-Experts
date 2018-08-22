@@ -25,8 +25,6 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
 
     if quantization_mode == 2:
         quantize_pis = True
-    elif quantization_mode == 0:
-        quantize_pis = False
 
     orig = read_image(image_path, use_yuv)
 
