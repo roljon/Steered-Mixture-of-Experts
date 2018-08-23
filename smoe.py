@@ -9,9 +9,10 @@ from quantizer import quantize_params, rescaler
 class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1,
                  train_gammas=True, radial_as=False, use_determinant=False, normalize_pis=True, quantization_mode=0,
-                 bit_depths=None, quantize_pis=True, lower_bounds=None, upper_bounds=None, iter_offset=0, margin=0.5):
+                 bit_depths=None, quantize_pis=True, lower_bounds=None, upper_bounds=None, use_yuv=True,
+                 iter_offset=0, margin=0.5):
         self.batch_shape = None
-        self.use_yuv = None
+        self.use_yuv = use_yuv
 
         # init params
         self.pis_init = None
@@ -198,7 +199,7 @@ class Smoe:
                                                   (tf.reduce_prod(self.batch_shape[:-1]),
                                                    tf.reduce_prod(self.batch_shape[-1])))
         self.target_op = self.joint_domain_batched_op[:, self.dim_domain:]
-        self.target_op = tf.reshape(self.target_op, [-1])
+        #self.target_op = tf.reshape(self.target_op, [-1])
         self.domain_op = self.joint_domain_batched_op[:, :self.dim_domain]
 
         self.kernel_list = tf.placeholder(shape=(None,), dtype=tf.bool)
@@ -289,12 +290,15 @@ class Smoe:
                                            tf.assign(self.gamma_e_best_var, self.gamma_e_var),
                                            tf.assign(self.nu_e_best_var, self.nu_e_var))
 
-        # mse = tf.reduce_sum(tf.square(self.restoration_op - target)) / tf.size(target, out_type=tf.float32)
-
-        mse = tf.reduce_sum(tf.square(tf.round(tf.reshape(self.res, [-1]) * 255) / 255 - self.target_op)) / tf.cast(tf.size(self.target_op), dtype=tf.float32)
+        mse = tf.reduce_mean(tf.square(tf.round(self.res * 255) / 255 - self.target_op))
         # margin in pixel to determine epsilon
         epsilon = self.margin * 1/(2**8)
-        loss_pixel = tf.reduce_mean(tf.maximum(0., tf.square(tf.subtract(tf.abs(tf.subtract(tf.reshape(self.res, [-1]), self.target_op)), epsilon))))
+        loss_pixel = tf.maximum(0., tf.square(tf.subtract(tf.abs(tf.subtract(self.res, self.target_op)), epsilon)))
+        if  self.use_yuv:
+            loss_pixel = 6/8 * tf.reduce_mean(loss_pixel[:, 0]) + 1/8 * tf.reduce_sum(tf.reduce_mean(loss_pixel[:, 1::],
+                                                                                                     axis=0))
+        else:
+            loss_pixel = tf.reduce_mean(loss_pixel)
 
         self.num_pi_op = tf.count_nonzero(pis_mask)
 

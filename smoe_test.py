@@ -28,6 +28,9 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
 
     orig = read_image(image_path, use_yuv)
 
+    if not orig.shape[-1] == 3:
+        use_yuv = False
+
     if params_file is not None:
         init_params = load_params(params_file)
     else:
@@ -45,12 +48,10 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
     smoe = Smoe(orig, kernels_per_dim, init_params=init_params, train_pis=not disable_train_pis,
                 train_gammas=not disable_train_gammas, radial_as=radial_as, start_batches=batches,
                 use_determinant=use_determinant, normalize_pis=normalize_pis, quantization_mode=quantization_mode,
-                bit_depths=bit_depths, quantize_pis=quantize_pis, lower_bounds=lower_bounds, upper_bounds=upper_bounds)
+                bit_depths=bit_depths, quantize_pis=quantize_pis, lower_bounds=lower_bounds, upper_bounds=upper_bounds,
+                use_yuv=use_yuv)
 
-    if orig.shape[-1] == 3:
-        smoe.use_yuv = use_yuv
-    else:
-        smoe.use_yuv = False
+
 
     optimizer1 = tf.train.AdamOptimizer(base_lr)
     optimizer2 = tf.train.AdamOptimizer(base_lr/lr_div)
