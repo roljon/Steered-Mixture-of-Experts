@@ -10,9 +10,10 @@ class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1,
                  train_gammas=True, radial_as=False, use_determinant=False, normalize_pis=True, quantization_mode=0,
                  bit_depths=None, quantize_pis=True, lower_bounds=None, upper_bounds=None, use_yuv=True,
-                 iter_offset=0, margin=0.5):
+                 only_y_gamma=False, iter_offset=0, margin=0.5):
         self.batch_shape = None
         self.use_yuv = use_yuv
+        self.only_y_gamma = only_y_gamma
 
         # init params
         self.pis_init = None
@@ -214,6 +215,11 @@ class Smoe:
         else:
            A = self.qA
 
+        if self.use_yuv and train_gammas and self.only_y_gamma:
+            gamma_mask = np.zeros((self.dim_domain, num_channels))
+            gamma_mask[:, 0] = 1
+            gamma_mask = np.tile(gamma_mask, (gamma_e_init.shape[0], 1, 1))
+            self.qgamma_e = self.qgamma_e * gamma_mask
 
         pis_mask = self.qpis > 0
         bool_mask = tf.logical_and(self.kernel_list, pis_mask)

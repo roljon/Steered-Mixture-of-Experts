@@ -18,7 +18,7 @@ from utils import save_model, load_params, read_image
 
 def main(image_path, results_path, iterations, validation_iterations, kernels_per_dim, params_file, l1reg, base_lr,
          batches, checkpoint_path, lr_div, lr_mult, disable_train_pis, disable_train_gammas, radial_as, use_determinant,
-         normalize_pis, quantization_mode, bit_depths, quantize_pis, lower_bounds, upper_bounds, use_yuv):
+         normalize_pis, quantization_mode, bit_depths, quantize_pis, lower_bounds, upper_bounds, use_yuv, only_y_gamma):
 
     if len(bit_depths) != 5:
         raise ValueError("Number of bit depths must be five!")
@@ -30,6 +30,8 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
 
     if not orig.shape[-1] == 3:
         use_yuv = False
+    if not use_yuv:
+        only_y_gamma = False
 
     if params_file is not None:
         init_params = load_params(params_file)
@@ -49,7 +51,7 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
                 train_gammas=not disable_train_gammas, radial_as=radial_as, start_batches=batches,
                 use_determinant=use_determinant, normalize_pis=normalize_pis, quantization_mode=quantization_mode,
                 bit_depths=bit_depths, quantize_pis=quantize_pis, lower_bounds=lower_bounds, upper_bounds=upper_bounds,
-                use_yuv=use_yuv)
+                use_yuv=use_yuv, only_y_gamma=only_y_gamma)
 
 
 
@@ -118,6 +120,9 @@ if __name__ == '__main__':
 
     parser.add_argument('-yuv', '--use_yuv', type=str2bool, nargs='?',
                         const=True, default=True, help="uses YUV color space for modeling if three channels are provided.")
+    parser.add_argument('-oyg', '--only_y_gamma', type=str2bool, nargs='?',
+                        const=False, default=False,
+                        help="train only slopes for y channel if yuv channels are used for modeling.")
 
 
     args = parser.parse_args()
