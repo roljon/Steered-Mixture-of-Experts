@@ -437,11 +437,11 @@ class Smoe:
                                                              update_reconstruction=False)
 
                 if validate:
+                    self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches
                     if self.quantization_mode == 1 or self.quantization_mode == 2:
                         self.qparams = quantize_params(self, self.get_params())
                     if self.quantization_mode == 1:
                         self.rparams = rescaler(self, self.qparams)
-                        self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches
                         qloss_val, qmse_val, _ = self.run_batched(pis_l1=pis_l1,
                                                                   u_l1=u_l1, train=False, update_reconstruction=True,
                                                                   with_quantized_params=True)
