@@ -41,7 +41,7 @@ def save_model(smoe, path, best=False, reduce=True, quantize=False):
         qparams.update({'radial_as': smoe.radial_as})
         qparams.update({'trained_pis': smoe.train_pis})
         qparams.update({'use_yuv': smoe.use_yuv})
-        params.update({'only_y_gamma'. smoe.only_y_gamma})
+        params.update({'only_y_gamma': smoe.only_y_gamma})
         cp.update({'qparams': qparams})
 
     with open(path, 'wb') as fd:
