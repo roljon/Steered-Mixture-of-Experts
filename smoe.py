@@ -305,11 +305,11 @@ class Smoe:
         self.A_best_var = tf.Variable(self.A_var)
         self.gamma_e_best_var = tf.Variable(self.gamma_e_var)
         self.nu_e_best_var = tf.Variable(self.nu_e_var)
-        self.checkpoint_best_op = tf.group(tf.assign(self.pis_best_var, self.pis_var),
-                                           tf.assign(self.musX_best_var, self.musX_var),
-                                           tf.assign(self.A_best_var, self.A_var),
-                                           tf.assign(self.gamma_e_best_var, self.gamma_e_var),
-                                           tf.assign(self.nu_e_best_var, self.nu_e_var))
+        self.checkpoint_best_op = tf.group(tf.assign(self.pis_best_var, self.qpis),
+                                           tf.assign(self.musX_best_var, self.qmusX),
+                                           tf.assign(self.A_best_var, self.qA),
+                                           tf.assign(self.gamma_e_best_var, self.qgamma_e),
+                                           tf.assign(self.nu_e_best_var, self.qnu_e))
 
         mse = tf.reduce_mean(tf.square(tf.round(self.res * 255) / 255 - self.target_op))
         # margin in pixel to determine epsilon

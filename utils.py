@@ -13,7 +13,7 @@ def reduce_params(params):
     return params
 
 
-def save_model(smoe, path, best=False, reduce=True, quantize=False):
+def save_model(smoe, path, best=False, reduce=True, quantize=True):
     if best:
         params = smoe.get_best_params()
     else:
