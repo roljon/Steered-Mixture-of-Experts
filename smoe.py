@@ -422,7 +422,7 @@ class Smoe:
         # self.losses = []
         # self.mses = []
         # self.num_pis = []
-        if self.quantization_mode == 1 or self.quantization_mode == 2:
+        if self.quantization_mode >= 1:
             self.qparams = quantize_params(self, self.get_params())
         if self.quantization_mode == 1:
             self.rparams = rescaler(self, self.qparams)
@@ -453,7 +453,7 @@ class Smoe:
 
                 if validate:
                     self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches
-                    if self.quantization_mode == 1 or self.quantization_mode == 2:
+                    if self.quantization_mode >= 1:
                         self.qparams = quantize_params(self, self.get_params())
                     if self.quantization_mode == 1:
                         self.rparams = rescaler(self, self.qparams)
