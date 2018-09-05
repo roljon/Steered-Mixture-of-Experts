@@ -176,13 +176,28 @@ class Smoe:
             self.qgamma_e = tf.fake_quant_with_min_max_args(self.gamma_e_var,
                                                             min=self.lower_bounds[4], max=self.upper_bounds[4],
                                                             num_bits=self.bit_depths[4])
+        elif self.quantization_mode == 3:
+            self.qA = tf.fake_quant_with_min_max_vars(self.A_var, min=tf.reduce_min(self.A_var),
+                                                      max=tf.reduce_max(self.A_var), num_bits=self.bit_depths[0])
+            self.qmusX = tf.fake_quant_with_min_max_vars(self.musX_var,
+                                                         min=tf.reduce_min(self.musX_var),
+                                                         max=tf.reduce_max(self.musX_var),
+                                                         num_bits=self.bit_depths[1])
+            self.qnu_e = tf.fake_quant_with_min_max_vars(self.nu_e_var,
+                                                         min=tf.reduce_min(self.nu_e_var),
+                                                         max=tf.reduce_max(self.nu_e_var),
+                                                         num_bits=self.bit_depths[2])
+            self.qgamma_e = tf.fake_quant_with_min_max_vars(self.gamma_e_var,
+                                                            min=tf.reduce_min(self.gamma_e_var),
+                                                            max=tf.reduce_max(self.gamma_e_var),
+                                                            num_bits=self.bit_depths[4])
         else:
             self.qA = self.A_var
             self.qmusX = self.musX_var
             self.qnu_e = self.nu_e_var
             self.qgamma_e = self.gamma_e_var
 
-        if self.quantization_mode == 2 or self.quantize_pis:
+        if self.quantization_mode >= 2 or self.quantize_pis:
             self.qpis = tf.fake_quant_with_min_max_args(self.pis_var, min=self.lower_bounds[3],
                                                         max=self.upper_bounds[3], num_bits=self.bit_depths[3])
         else:

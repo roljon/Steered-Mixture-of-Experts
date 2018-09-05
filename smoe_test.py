@@ -23,7 +23,7 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
     if len(bit_depths) != 5:
         raise ValueError("Number of bit depths must be five!")
 
-    if quantization_mode == 2:
+    if quantization_mode >= 2:
         quantize_pis = True
 
     orig = read_image(image_path, use_yuv)
@@ -108,11 +108,12 @@ if __name__ == '__main__':
 
     parser.add_argument('-qm', '--quantization_mode', type=int, default=0,
                         help="Quantization mode: 0 - no quantization, 1 - quantization each validation step,"
-                             " 2 - fake quantization optimization")
+                             " 2 - fake quantization optimization (fix min/max),"
+                             " 3 - fake quantization optimization (variable min/max, except for pis)")
     parser.add_argument('-bd', '--bit_depths', type=int, default=[20, 18, 6, 10, 10], nargs='+',
                         help="bit depths of each kind of parameter. number of numbers must be 5 in the order: A, musX, nu_e, pis, gamma_e")
     parser.add_argument('-qp', '--quantize_pis', type=str2bool, nargs='?',
-                        const=True, default=True, help="Quantize Pis while optimization (only valid for quantization mode 1, for quantization mode 2 always True)")
+                        const=True, default=True, help="Quantize Pis while optimization (only valid for quantization mode 1, for quantization mode 2,3 always True)")
     parser.add_argument('-lb', '--lower_bounds', type=float, default=[-2500, -.3, -5, 0, -32], nargs='+',
                         help="lower bounds of parameters for quantization while optimization")
     parser.add_argument('-ub', '--upper_bounds', type=float, default=[2500, 1.3, 5, 2, 32], nargs='+',

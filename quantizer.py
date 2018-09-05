@@ -5,7 +5,7 @@ def quantize_params(smoe, params):
 
     params = reduce_params(params)
 
-    if smoe.quantization_mode <= 1:
+    if smoe.quantization_mode <= 1 or smoe.quantization_mode == 3:
         lb_A = np.amin(params['A'], axis=0, keepdims=True)
         ub_A = np.amax(params['A'], axis=0, keepdims=True)
         lb_musX = np.amin(params['musX'], axis=0, keepdims=True)
