@@ -159,7 +159,12 @@ class Smoe:
             if A_init.ndim == 1:
                 self.A_var = tf.Variable(A_init, dtype=tf.float32)
             else:
-                self.A_var = tf.Variable(A_init[:, 0, 0], dtype=tf.float32)
+                # TODO HOTFIX to make radial kernels for variable min/max quant working
+                if self.quantization_mode == 3:
+                    self.A_var = tf.Variable(A_init[:, 0, 0] + np.random.randint(0, 100, (A_init.shape[0],)) * 1,
+                                             dtype=tf.float32)
+                else:
+                    self.A_var = tf.Variable(A_init[:, 0, 0],dtype=tf.float32)
         else:
             self.A_var = tf.Variable(A_init, dtype=tf.float32)
 
