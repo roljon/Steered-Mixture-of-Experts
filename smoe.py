@@ -164,6 +164,14 @@ class Smoe:
             self.A_var = tf.Variable(A_init, dtype=tf.float32)
 
         # Quantization of parameters (if requested)
+        if self.quantization_mode >= 2 or self.quantize_pis:
+            self.qpis = tf.fake_quant_with_min_max_args(self.pis_var, min=self.lower_bounds[3],
+                                                        max=self.upper_bounds[3], num_bits=self.bit_depths[3])
+        else:
+            self.qpis = self.pis_var
+
+        pis_mask = self.qpis > 0
+
         if self.quantization_mode == 2:
             self.qA = tf.fake_quant_with_min_max_args(self.A_var, min=self.lower_bounds[0],
                                                       max=self.upper_bounds[0], num_bits=self.bit_depths[0])
@@ -177,19 +185,19 @@ class Smoe:
                                                             min=self.lower_bounds[4], max=self.upper_bounds[4],
                                                             num_bits=self.bit_depths[4])
         elif self.quantization_mode == 3:
-            self.qA = tf.fake_quant_with_min_max_vars(self.A_var, min=tf.reduce_min(self.A_var),
-                                                      max=tf.reduce_max(self.A_var), num_bits=self.bit_depths[0])
+            self.qA = tf.fake_quant_with_min_max_vars(self.A_var, min=tf.reduce_min(tf.boolean_mask(self.A_var, pis_mask)),
+                                                      max=tf.reduce_max(tf.boolean_mask(self.A_var, pis_mask)), num_bits=self.bit_depths[0])
             self.qmusX = tf.fake_quant_with_min_max_vars(self.musX_var,
-                                                         min=tf.reduce_min(self.musX_var),
-                                                         max=tf.reduce_max(self.musX_var),
+                                                         min=tf.reduce_min(tf.boolean_mask(self.musX_var, pis_mask)),
+                                                         max=tf.reduce_max(tf.boolean_mask(self.musX_var, pis_mask)),
                                                          num_bits=self.bit_depths[1])
             self.qnu_e = tf.fake_quant_with_min_max_vars(self.nu_e_var,
-                                                         min=tf.reduce_min(self.nu_e_var),
-                                                         max=tf.reduce_max(self.nu_e_var),
+                                                         min=tf.reduce_min(tf.boolean_mask(self.nu_e_var, pis_mask)),
+                                                         max=tf.reduce_max(tf.boolean_mask(self.nu_e_var, pis_mask)),
                                                          num_bits=self.bit_depths[2])
             self.qgamma_e = tf.fake_quant_with_min_max_vars(self.gamma_e_var,
-                                                            min=tf.reduce_min(self.gamma_e_var),
-                                                            max=tf.reduce_max(self.gamma_e_var),
+                                                            min=tf.reduce_min(tf.boolean_mask(self.gamma_e_var, pis_mask)),
+                                                            max=tf.reduce_max(tf.boolean_mask(self.gamma_e_var, pis_mask)),
                                                             num_bits=self.bit_depths[4])
         else:
             self.qA = self.A_var
@@ -197,11 +205,7 @@ class Smoe:
             self.qnu_e = self.nu_e_var
             self.qgamma_e = self.gamma_e_var
 
-        if self.quantization_mode >= 2 or self.quantize_pis:
-            self.qpis = tf.fake_quant_with_min_max_args(self.pis_var, min=self.lower_bounds[3],
-                                                        max=self.upper_bounds[3], num_bits=self.bit_depths[3])
-        else:
-            self.qpis = self.pis_var
+
 
         num_channels = gamma_e_init.shape[-1]
 
@@ -236,7 +240,7 @@ class Smoe:
             gamma_mask = np.tile(gamma_mask, (gamma_e_init.shape[0], 1, 1))
             self.qgamma_e = self.qgamma_e * gamma_mask
 
-        pis_mask = self.qpis > 0
+
         bool_mask = tf.logical_and(self.kernel_list, pis_mask)
 
         # track indices of used and necessary kernels
