@@ -325,11 +325,10 @@ class Smoe:
         #mse = tf.reduce_mean(tf.square(tf.round(self.res * 255) / 255 - self.target_op))
         mse = tf.reduce_mean(tf.square(self.res - self.target_op))
 
-        # margin in pixel to determine epsilon
-        epsilon = self.margin * 1/(2**8)
-        loss_pixel = tf.maximum(0., tf.square(tf.subtract(tf.abs(tf.subtract(self.res, self.target_op)), epsilon)))
-
         if not self.ssim_opt:
+            # margin in pixel to determine epsilon
+            epsilon = self.margin * 1 / (2 ** 8)
+            loss_pixel = tf.maximum(0., tf.square(tf.subtract(tf.abs(tf.subtract(self.res, self.target_op)), epsilon)))
             if self.use_yuv:
                 loss_pixel = 6/8 * tf.reduce_mean(loss_pixel[:, 0]) + 1/8 * tf.reduce_sum(tf.reduce_mean(loss_pixel[:, 1::],
                                                                                                          axis=0))
