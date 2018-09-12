@@ -18,7 +18,8 @@ from utils import save_model, load_params, read_image
 
 def main(image_path, results_path, iterations, validation_iterations, kernels_per_dim, params_file, l1reg, base_lr,
          batches, checkpoint_path, lr_div, lr_mult, disable_train_pis, disable_train_gammas, radial_as, use_determinant,
-         normalize_pis, quantization_mode, bit_depths, quantize_pis, lower_bounds, upper_bounds, use_yuv, only_y_gamma):
+         normalize_pis, quantization_mode, bit_depths, quantize_pis, lower_bounds, upper_bounds, use_yuv, only_y_gamma,
+         ssim_opt):
 
     if len(bit_depths) != 5:
         raise ValueError("Number of bit depths must be five!")
@@ -51,7 +52,7 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
                 train_gammas=not disable_train_gammas, radial_as=radial_as, start_batches=batches,
                 use_determinant=use_determinant, normalize_pis=normalize_pis, quantization_mode=quantization_mode,
                 bit_depths=bit_depths, quantize_pis=quantize_pis, lower_bounds=lower_bounds, upper_bounds=upper_bounds,
-                use_yuv=use_yuv, only_y_gamma=only_y_gamma)
+                use_yuv=use_yuv, only_y_gamma=only_y_gamma, ssim_opt=ssim_opt)
 
 
 
@@ -125,6 +126,10 @@ if __name__ == '__main__':
                         const=False, default=False,
                         help="train only slopes for y channel if yuv channels are used for modeling.")
 
+    parser.add_argument('-ssim', '--ssim_opt', type=str2bool, nargs='?',
+                        const=False, default=False,
+                        help="SSIM optimization instead of MSE. (only working for images so far and batch size 1,"
+                             " otherwise block artefacts)")
 
     args = parser.parse_args()
 
