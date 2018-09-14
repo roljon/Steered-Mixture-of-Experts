@@ -343,14 +343,56 @@ class Smoe:
                 target_u = tf.reshape(self.target_op[:, 1], self.batch_shape[:-1] + (1,))
                 target_v = tf.reshape(self.target_op[:, 2], self.batch_shape[:-1] + (1,))
 
-                loss_pixel = 1 - (6 / 8 * tf.image.ssim(res_y, target_y, max_val=1)
-                                  + 1 / 8 * tf.image.ssim(res_u, target_u, max_val=1)
-                                  + 1 / 8 * tf.image.ssim(res_v, target_v, max_val=1))
+                if self.dim_domain == 2:
+                    paddings = tf.constant([[5, 5], [5, 5], [0, 0]])
+                    res_y = tf.pad(res_y, paddings, "SYMMETRIC")
+                    res_u = tf.pad(res_u, paddings, "SYMMETRIC")
+                    res_v = tf.pad(res_v, paddings, "SYMMETRIC")
+                    target_y = tf.pad(target_y, paddings, "SYMMETRIC")
+                    target_u = tf.pad(target_u, paddings, "SYMMETRIC")
+                    target_v = tf.pad(target_v, paddings, "SYMMETRIC")
+
+                    loss_pixel = 1 - (6 / 8 * tf.image.ssim(res_y, target_y, max_val=1)
+                                      + 1 / 8 * tf.image.ssim(res_u, target_u, max_val=1)
+                                      + 1 / 8 * tf.image.ssim(res_v, target_v, max_val=1))
+                elif self.dim_domain == 3:
+                    ssim_y = []
+                    ssim_u = []
+                    ssim_v = []
+                    paddings = tf.constant([[5, 5], [5, 5], [0, 0], [0, 0]])
+                    res_y = tf.pad(res_y, paddings, "SYMMETRIC")
+                    res_u = tf.pad(res_u, paddings, "SYMMETRIC")
+                    res_v = tf.pad(res_v, paddings, "SYMMETRIC")
+                    target_y = tf.pad(target_y, paddings, "SYMMETRIC")
+                    target_u = tf.pad(target_u, paddings, "SYMMETRIC")
+                    target_v = tf.pad(target_v, paddings, "SYMMETRIC")
+                    for ii in range(self.batch_shape[2]):
+                        ssim_y.append(tf.image.ssim(res_y[:, :, ii, :], target_y[:, :, ii, :], max_val=1))
+                        ssim_u.append(tf.image.ssim(res_u[:, :, ii, :], target_u[:, :, ii, :], max_val=1))
+                        ssim_v.append(tf.image.ssim(res_v[:, :, ii, :], target_v[:, :, ii, :], max_val=1))
+                    loss_pixel = 1 - (6/8 * tf.reduce_mean(ssim_y)
+                                      + 1/8 * tf.reduce_mean(ssim_u)
+                                      + 1/8 * tf.reduce_mean(ssim_v))
+
             else:
                 res = tf.reshape(self.res, self.batch_shape[:-1] + (num_channels,))
                 self.target_op = tf.reshape(self.target_op, self.batch_shape[:-1] + (num_channels,))
 
-                loss_pixel = 1 - tf.image.ssim(res, self.target_op, max_val=1)
+                if self.dim_domain == 2:
+                    paddings = tf.constant([[5, 5], [5, 5], [0, 0]])
+                    res = tf.pad(res, paddings, "SYMMETRIC")
+                    self.target_op = tf.pad(self.target_op, paddings, "SYMMETRIC")
+
+                    loss_pixel = 1 - tf.image.ssim(res, self.target_op, max_val=1)
+                elif self.dim_domain == 3:
+                    ssim = []
+                    paddings = tf.constant([[5, 5], [5, 5], [0, 0], [0, 0]])
+                    res = tf.pad(res, paddings, "SYMMETRIC")
+                    self.target_op = tf.pad(self.target_op, paddings, "SYMMETRIC")
+                    for ii in range(self.batch_shape[2]):
+                        ssim.append(tf.image.ssim(res[:, :, ii, :], self.target_op[:, :, ii, :], max_val=1))
+                    ssim = tf.reduce_mean(ssim)
+                    loss_pixel = 1 - ssim
 
         self.num_pi_op = tf.count_nonzero(pis_mask)
 

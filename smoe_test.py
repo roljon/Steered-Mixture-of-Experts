@@ -128,8 +128,7 @@ if __name__ == '__main__':
 
     parser.add_argument('-ssim', '--ssim_opt', type=str2bool, nargs='?',
                         const=False, default=False,
-                        help="SSIM optimization instead of MSE. (only working for images so far and batch size 1,"
-                             " otherwise block artefacts)")
+                        help="SSIM optimization instead of MSE.")
 
     args = parser.parse_args()
 
