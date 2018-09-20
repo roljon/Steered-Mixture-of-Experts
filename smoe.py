@@ -158,16 +158,27 @@ class Smoe:
 
         if radial_as:
             if A_init.ndim == 1:
-                self.A_var = tf.Variable(A_init, dtype=tf.float32)
+                self.A_diagonal_var = tf.Variable(A_init, dtype=tf.float32)
             else:
                 # TODO HOTFIX to make radial kernels for variable min/max quant working
                 if self.quantization_mode == 3:
-                    self.A_var = tf.Variable(A_init[:, 0, 0] + np.random.randint(0, 100, (A_init.shape[0],)) * 1,
-                                             dtype=tf.float32)
+                    self.A_diagonal_var = tf.Variable(A_init[:, 0, 0]
+                                                      + np.random.randint(0, 100, (A_init.shape[0],)) * 1,
+                                                      dtype=tf.float32)
                 else:
-                    self.A_var = tf.Variable(A_init[:, 0, 0],dtype=tf.float32)
+                    self.A_diagonal_var = tf.Variable(A_init[:, 0, 0], dtype=tf.float32)
+            self.A_corr_var = tf.Variable(np.zeros_like(A_init), trainable=False, dtype=tf.float32)
         else:
-            self.A_var = tf.Variable(A_init, dtype=tf.float32)
+            # TODO Hotfix
+            if self.quantization_mode == 3:
+                mask = np.zeros((self.dim_domain, self.dim_domain))
+                np.fill_diagonal(mask, 1)
+                mask = np.tile(mask, (A_init.shape[0], 1, 1))
+                noise_matrix = np.random.randint(0, 100, A_init.shape) * mask
+                self.A_diagonal_var = tf.Variable(A_init + noise_matrix, dtype=tf.float32)
+            else:
+                self.A_diagonal_var = tf.Variable(A_init, dtype=tf.float32)
+            self.A_corr_var = tf.Variable(np.zeros_like(A_init), dtype=tf.float32)
 
         # Quantization of parameters (if requested)
         if self.quantization_mode >= 2 or self.quantize_pis:
@@ -179,8 +190,11 @@ class Smoe:
         pis_mask = self.qpis > 0
 
         if self.quantization_mode == 2:
-            self.qA = tf.fake_quant_with_min_max_args(self.A_var, min=self.lower_bounds[0],
-                                                      max=self.upper_bounds[0], num_bits=self.bit_depths[0])
+            self.qA_diagonal = tf.fake_quant_with_min_max_args(self.A_diagonal_var, min=self.lower_bounds[0],
+                                                               max=self.upper_bounds[0], num_bits=self.bit_depths[0])
+            self.qA_corr = tf.fake_quant_with_min_max_args(self.A_corr_var, min=self.lower_bounds[0],
+                                                           max=self.upper_bounds[0], num_bits=self.bit_depths[0])
+
             self.qmusX = tf.fake_quant_with_min_max_args(self.musX_var,
                                                          min=self.lower_bounds[1], max=self.upper_bounds[1],
                                                          num_bits=self.bit_depths[1])
@@ -191,8 +205,21 @@ class Smoe:
                                                             min=self.lower_bounds[4], max=self.upper_bounds[4],
                                                             num_bits=self.bit_depths[4])
         elif self.quantization_mode == 3:
-            self.qA = tf.fake_quant_with_min_max_vars(self.A_var, min=tf.reduce_min(tf.boolean_mask(self.A_var, pis_mask)),
-                                                      max=tf.reduce_max(tf.boolean_mask(self.A_var, pis_mask)), num_bits=self.bit_depths[0])
+            if self.radial_as:
+                self.qA_diagonal = tf.fake_quant_with_min_max_vars(self.A_diagonal_var,
+                                                                   min=tf.reduce_min(tf.boolean_mask(self.A_diagonal_var, pis_mask)),
+                                                                   max=tf.reduce_max(tf.boolean_mask(self.A_diagonal_var, pis_mask)),
+                                                                   num_bits=self.bit_depths[0])
+            else:
+                self.qA_diagonal = tf.fake_quant_with_min_max_vars(self.A_diagonal_var,
+                                                                   min=tf.reduce_min(tf.matrix_diag_part(tf.boolean_mask(self.A_diagonal_var, pis_mask))),
+                                                                   max=tf.reduce_max(tf.matrix_diag_part(tf.boolean_mask(self.A_diagonal_var, pis_mask))),
+                                                                   num_bits=self.bit_depths[0])
+            self.qA_corr = tf.fake_quant_with_min_max_vars(self.A_corr_var,
+                                                           min=tf.reduce_min(tf.boolean_mask(self.A_corr_var, pis_mask)),
+                                                           max=tf.reduce_max(tf.boolean_mask(self.A_corr_var, pis_mask)),
+                                                           num_bits=self.bit_depths[0])
+
             self.qmusX = tf.fake_quant_with_min_max_vars(self.musX_var,
                                                          min=tf.reduce_min(tf.boolean_mask(self.musX_var, pis_mask)),
                                                          max=tf.reduce_max(tf.boolean_mask(self.musX_var, pis_mask)),
@@ -206,7 +233,8 @@ class Smoe:
                                                             max=tf.reduce_max(tf.boolean_mask(self.gamma_e_var, pis_mask)),
                                                             num_bits=self.bit_depths[4])
         else:
-            self.qA = self.A_var
+            self.qA_diagonal = self.A_diagonal_var
+            self.qA_corr = self.A_corr_var
             self.qmusX = self.musX_var
             self.qnu_e = self.nu_e_var
             self.qgamma_e = self.gamma_e_var
@@ -235,10 +263,12 @@ class Smoe:
            A_mask = np.zeros((self.dim_domain, self.dim_domain))
            np.fill_diagonal(A_mask, 1)
            A_mask = np.tile(A_mask, (A_init.shape[0], 1, 1))
-           A = tf.tile(tf.expand_dims(tf.expand_dims(self.qA, axis=-1), axis=-1), (1, self.dim_domain, self.dim_domain))
-           A = A * A_mask
+           A = tf.tile(tf.expand_dims(tf.expand_dims(self.qA_diagonal, axis=-1), axis=-1), (1, self.dim_domain, self.dim_domain))
+           A_diagonal = A * A_mask
         else:
-           A = self.qA
+           A_diagonal = self.qA_diagonal
+        A_corr = self.qA_corr
+
 
         if self.use_yuv and train_gammas and self.only_y_gamma:
             gamma_mask = np.zeros((self.dim_domain, num_channels))
@@ -246,6 +276,9 @@ class Smoe:
             gamma_mask = np.tile(gamma_mask, (gamma_e_init.shape[0], 1, 1))
             self.qgamma_e = self.qgamma_e * gamma_mask
 
+        # combine A_diagonal and A_corr and use only triangular part
+        A = tf.matrix_band_part(A_diagonal, 0, 0) \
+            + tf.matrix_band_part(tf.matrix_set_diag(A_corr, np.zeros((self.start_pis, self.dim_domain))), -1, 0)
 
         bool_mask = tf.logical_and(self.kernel_list, pis_mask)
 
@@ -274,9 +307,7 @@ class Smoe:
 
         x_sub_mu = tf.expand_dims(domain_exp - musX, axis=-1)
 
-        # use only triangular part
-        A_lower = tf.matrix_band_part(A, -1, 0)
-        n_exp = tf.exp(-0.5 * einsum('abli,alm,anm,abnj->ab', x_sub_mu, A_lower, A_lower, x_sub_mu))
+        n_exp = tf.exp(-0.5 * einsum('abli,alm,anm,abnj->ab', x_sub_mu, A, A, x_sub_mu))
 
         if use_determinant:
             n_div = tf.reduce_prod(tf.matrix_diag_part(A), axis=-1)
@@ -312,12 +343,14 @@ class Smoe:
         # checkpoint op
         self.pis_best_var = tf.Variable(self.pis_var)
         self.musX_best_var = tf.Variable(self.musX_var)
-        self.A_best_var = tf.Variable(self.A_var)
+        self.A_diagonal_best_var = tf.Variable(self.A_diagonal_var)
+        self.A_corr_best_var = tf.Variable(self.A_corr_var)
         self.gamma_e_best_var = tf.Variable(self.gamma_e_var)
         self.nu_e_best_var = tf.Variable(self.nu_e_var)
         self.checkpoint_best_op = tf.group(tf.assign(self.pis_best_var, self.qpis),
                                            tf.assign(self.musX_best_var, self.qmusX),
-                                           tf.assign(self.A_best_var, self.qA),
+                                           tf.assign(self.A_diagonal_best_var, self.qA_diagonal),
+                                           tf.assign(self.A_corr_best_var, self.qA_corr),
                                            tf.assign(self.gamma_e_best_var, self.qgamma_e),
                                            tf.assign(self.nu_e_best_var, self.qnu_e))
 
@@ -446,7 +479,7 @@ class Smoe:
 
         var_opt1 = [self.nu_e_var, self.gamma_e_var, self.musX_var]
         var_opt2 = [self.pis_var]
-        var_opt3 = [self.A_var]
+        var_opt3 = [self.A_diagonal_var, self.A_corr_var]#[self.A_var]
 
         # sort out not trainable vars
         var_opt1 = [var for var in var_opt1 if var in tf.trainable_variables()]
@@ -648,10 +681,11 @@ class Smoe:
         return loss_val, mse_val, num_pi
 
     def get_params(self):
-        pis, musX, A, gamma_e, nu_e = self.session.run([self.qpis, self.qmusX, self.qA,
-                                                        self.qgamma_e, self.qnu_e])
+        pis, musX, A_diagonal, A_corr, gamma_e, nu_e = self.session.run([self.qpis, self.qmusX,
+                                                                         self.qA_diagonal, self.qA_corr,
+                                                                         self.qgamma_e, self.qnu_e])
 
-        out_dict = {'pis': pis, 'musX': musX, 'A': A, 'gamma_e': gamma_e, 'nu_e': nu_e}
+        out_dict = {'pis': pis, 'musX': musX, 'A_diagonal': A_diagonal, 'A_corr': A_corr, 'gamma_e': gamma_e, 'nu_e': nu_e}
         return out_dict
 
     def get_gradients(self):
@@ -673,10 +707,11 @@ class Smoe:
         return self.weight_matrix_argmax
 
     def get_best_params(self):
-        pis, musX, A, gamma_e, nu_e = self.session.run([self.pis_best_var, self.musX_best_var, self.A_best_var,
-                                                        self.gamma_e_best_var, self.nu_e_best_var])
+        pis, musX, A_diagonal, A_corr, gamma_e, nu_e = self.session.run([self.pis_best_var, self.musX_best_var,
+                                                                         self.A_diagonal_best_var, self.A_corr_best_var,
+                                                                         self.gamma_e_best_var, self.nu_e_best_var])
 
-        out_dict = {'pis': pis, 'musX': musX, 'A': A, 'gamma_e': gamma_e, 'nu_e': nu_e}
+        out_dict = {'pis': pis, 'musX': musX, 'A_diagonal': A_diagonal, 'A_corr': A_corr, 'gamma_e': gamma_e, 'nu_e': nu_e}
         return out_dict
 
     def get_best_reconstruction(self):

@@ -29,7 +29,7 @@ class ModelLogger:
         reconstruction = smoe.get_reconstruction()
 
         save_model(smoe, self.params_path + "/{0:08d}_params.pkl".format(iter_), best=False, reduce=True,
-                   quantize=True if (smoe.quantization_mode == 1 or smoe.quantization_mode == 2) else False)
+                   quantize=True if (smoe.quantization_mode >= 1) else False)
 
         if self.as_media:
             write_image(reconstruction, self.reconstruction_path + "/{0:08d}_reconstruction".format(iter_), smoe.dim_domain, smoe.use_yuv)
