@@ -8,7 +8,7 @@ from quantizer import quantize_params, rescaler
 
 class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1,
-                 train_gammas=True, radial_as=False, use_determinant=False, normalize_pis=True, quantization_mode=0,
+                 train_gammas=True, train_musx=True, radial_as=False, use_determinant=False, normalize_pis=True, quantization_mode=0,
                  bit_depths=None, quantize_pis=True, lower_bounds=None, upper_bounds=None, use_yuv=True,
                  only_y_gamma=False, ssim_opt=False, iter_offset=0, margin=0.5):
         self.batch_shape = None
@@ -100,6 +100,7 @@ class Smoe:
         self.qweight_matrix_argmax = None
         self.train_pis = train_pis
         self.train_gammas = train_gammas
+        self.train_musx = train_musx
         self.radial_as = radial_as
         self.quantization_mode = quantization_mode
         self.bit_depths = bit_depths
@@ -147,7 +148,7 @@ class Smoe:
 
         self.nu_e_var = tf.Variable(nu_e_init, dtype=tf.float32)
         self.gamma_e_var = tf.Variable(gamma_e_init, trainable=train_gammas, dtype=tf.float32)
-        self.musX_var = tf.Variable(musX_init, dtype=tf.float32)
+        self.musX_var = tf.Variable(musX_init, trainable=self.train_musx, dtype=tf.float32)
         #self.A_var = tf.Variable(A_init, dtype=tf.float32)
         self.pis_var = tf.Variable(pis_init, trainable=train_pis, dtype=tf.float32)
 
@@ -219,11 +220,13 @@ class Smoe:
                                                            min=tf.reduce_min(tf.boolean_mask(self.A_corr_var, pis_mask)),
                                                            max=tf.reduce_max(tf.boolean_mask(self.A_corr_var, pis_mask)),
                                                            num_bits=self.bit_depths[0])
-
-            self.qmusX = tf.fake_quant_with_min_max_vars(self.musX_var,
-                                                         min=tf.reduce_min(tf.boolean_mask(self.musX_var, pis_mask)),
-                                                         max=tf.reduce_max(tf.boolean_mask(self.musX_var, pis_mask)),
-                                                         num_bits=self.bit_depths[1])
+            if self.train_musx:
+                self.qmusX = tf.fake_quant_with_min_max_vars(self.musX_var,
+                                                             min=tf.reduce_min(tf.boolean_mask(self.musX_var, pis_mask)),
+                                                             max=tf.reduce_max(tf.boolean_mask(self.musX_var, pis_mask)),
+                                                             num_bits=self.bit_depths[1])
+            else:
+                self.qmusX = self.musX_var
             self.qnu_e = tf.fake_quant_with_min_max_vars(self.nu_e_var,
                                                          min=tf.reduce_min(tf.boolean_mask(self.nu_e_var, pis_mask)),
                                                          max=tf.reduce_max(tf.boolean_mask(self.nu_e_var, pis_mask)),

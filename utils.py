@@ -39,6 +39,7 @@ def save_model(smoe, path, best=False, reduce=True, quantize=True):
         qparams.update({'used_ranges': False})
         qparams.update({'quantized_tria_params': True})
         qparams.update({'trained_gamma': smoe.train_gammas})
+        qparams.update({'trained_musx': smoe.train_musx})
         qparams.update({'radial_as': smoe.radial_as})
         qparams.update({'trained_pis': smoe.train_pis})
         qparams.update({'use_yuv': smoe.use_yuv})
