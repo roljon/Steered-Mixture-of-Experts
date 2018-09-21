@@ -141,10 +141,10 @@ class Smoe:
         self.session = tf.InteractiveSession(config=tf.ConfigProto(gpu_options=gpu_options))
         # self.session = tf.Session()
 
-        self.init_model(self.joint_domain_batched, self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init,
+        self.init_model(self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init,
                         train_pis, train_gammas, radial_as, use_determinant)
 
-    def init_model(self, joint_domain_batched, nu_e_init, gamma_e_init, pis_init, musX_init, A_init, train_pis=True, train_gammas=True, radial_as=False, use_determinant=False):
+    def init_model(self, nu_e_init, gamma_e_init, pis_init, musX_init, A_init, train_pis=True, train_gammas=True, radial_as=False, use_determinant=False):
 
         self.nu_e_var = tf.Variable(nu_e_init, dtype=tf.float32)
         self.gamma_e_var = tf.Variable(gamma_e_init, trainable=train_gammas, dtype=tf.float32)
@@ -247,14 +247,9 @@ class Smoe:
         num_channels = gamma_e_init.shape[-1]
 
 
-        self.joint_domain_batched_op = tf.constant(joint_domain_batched, dtype=tf.float32)
+        self.joint_domain_batched_op = tf.placeholder(shape=(np.prod(self.batch_shape[:-1]), self.dim_domain + num_channels), dtype=tf.float32)
 
-        self.current_batch_number = tf.placeholder(dtype=tf.int32)
 
-        self.joint_domain_batched_op = self.joint_domain_batched_op[self.current_batch_number]
-        self.joint_domain_batched_op = tf.reshape(self.joint_domain_batched_op,
-                                                  (tf.reduce_prod(self.batch_shape[:-1]),
-                                                   tf.reduce_prod(self.batch_shape[-1])))
         self.target_op = self.joint_domain_batched_op[:, self.dim_domain:]
         #self.target_op = tf.reshape(self.target_op, [-1])
         self.domain_op = self.joint_domain_batched_op[:, :self.dim_domain]
@@ -482,7 +477,7 @@ class Smoe:
 
         var_opt1 = [self.nu_e_var, self.gamma_e_var, self.musX_var]
         var_opt2 = [self.pis_var]
-        var_opt3 = [self.A_diagonal_var, self.A_corr_var]#[self.A_var]
+        var_opt3 = [self.A_diagonal_var, self.A_corr_var]
 
         # sort out not trainable vars
         var_opt1 = [var for var in var_opt1 if var in tf.trainable_variables()]
@@ -640,7 +635,8 @@ class Smoe:
         bar = progressbar.ProgressBar(widgets=widgets)
         for ii in bar(range(self.start_batches)):
             retrieve = [self.loss_op, self.mse_op, self.num_pi_op, self.indices]
-            feed_dict = {self.current_batch_number: ii, self.pis_l1: pis_l1, self.u_l1: u_l1, self.kernel_list: self.kernel_list_per_batch[ii]}
+            feed_dict = {self.joint_domain_batched_op: self.joint_domain_batched[ii].reshape(-1, self.joint_domain_batched[ii].shape[-1]), self.pis_l1: pis_l1, self.u_l1: u_l1,
+                         self.kernel_list: self.kernel_list_per_batch[ii]}
             if train:
                 retrieve.append(self.accum_ops)
             if update_reconstruction:
