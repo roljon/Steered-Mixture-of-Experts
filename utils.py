@@ -29,7 +29,8 @@ def save_model(smoe, path, best=False, reduce=True, quantize=True):
     cp = {'params': params, 'mses': mses, 'losses': losses, 'num_pis': num_pis,
           'quantization_mode': smoe.quantization_mode, 'quantized_pis': smoe.quantize_pis,
           'lower_bounds': smoe.lower_bounds, 'upper_bounds': smoe.upper_bounds,
-          'use_yuv': smoe.use_yuv, 'only_y_gamma': smoe.ssim_opt, 'only_y_gamma': smoe.ssim_opt}
+          'use_yuv': smoe.use_yuv, 'only_y_gamma': smoe.only_y_gamma, 'ssim_opt': smoe.ssim_opt,
+          'use_determinant': smoe.use_determinant}
 
     if quantize:
         qparams = smoe.qparams
@@ -44,6 +45,7 @@ def save_model(smoe, path, best=False, reduce=True, quantize=True):
         qparams.update({'trained_pis': smoe.train_pis})
         qparams.update({'use_yuv': smoe.use_yuv})
         params.update({'only_y_gamma': smoe.only_y_gamma})
+        params.update({'use_determinant': smoe.use_determinant})
         cp.update({'qparams': qparams})
 
     with open(path, 'wb') as fd:

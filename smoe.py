@@ -102,6 +102,7 @@ class Smoe:
         self.train_gammas = train_gammas
         self.train_musx = train_musx
         self.radial_as = radial_as
+        self.use_determinant = use_determinant
         self.quantization_mode = quantization_mode
         self.bit_depths = bit_depths
         self.quantize_pis = quantize_pis
@@ -141,23 +142,22 @@ class Smoe:
         self.session = tf.InteractiveSession(config=tf.ConfigProto(gpu_options=gpu_options))
         # self.session = tf.Session()
 
-        self.init_model(self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init,
-                        train_pis, train_gammas, radial_as, use_determinant)
+        self.init_model(self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init)
 
-    def init_model(self, nu_e_init, gamma_e_init, pis_init, musX_init, A_init, train_pis=True, train_gammas=True, radial_as=False, use_determinant=False):
+    def init_model(self, nu_e_init, gamma_e_init, pis_init, musX_init, A_init):
 
         self.nu_e_var = tf.Variable(nu_e_init, dtype=tf.float32)
-        self.gamma_e_var = tf.Variable(gamma_e_init, trainable=train_gammas, dtype=tf.float32)
+        self.gamma_e_var = tf.Variable(gamma_e_init, trainable=self.train_gammas, dtype=tf.float32)
         self.musX_var = tf.Variable(musX_init, trainable=self.train_musx, dtype=tf.float32)
         #self.A_var = tf.Variable(A_init, dtype=tf.float32)
-        self.pis_var = tf.Variable(pis_init, trainable=train_pis, dtype=tf.float32)
+        self.pis_var = tf.Variable(pis_init, trainable=self.train_pis, dtype=tf.float32)
 
 
         # TODO make radial work again, uncomment for pcs scripts
         if A_init.ndim == 1:
-            radial_as = True
+            self.radial_as = True
 
-        if radial_as:
+        if self.radial_as:
             if A_init.ndim == 1:
                 self.A_diagonal_var = tf.Variable(A_init, dtype=tf.float32)
             else:
@@ -257,7 +257,7 @@ class Smoe:
         self.kernel_list = tf.placeholder(shape=(None,), dtype=tf.bool)
 
 
-        if radial_as:
+        if self.radial_as:
            A_mask = np.zeros((self.dim_domain, self.dim_domain))
            np.fill_diagonal(A_mask, 1)
            A_mask = np.tile(A_mask, (A_init.shape[0], 1, 1))
@@ -268,7 +268,7 @@ class Smoe:
         A_corr = self.qA_corr
 
 
-        if self.use_yuv and train_gammas and self.only_y_gamma:
+        if self.use_yuv and self.train_gammas and self.only_y_gamma:
             gamma_mask = np.zeros((self.dim_domain, num_channels))
             gamma_mask[:, 0] = 1
             gamma_mask = np.tile(gamma_mask, (gamma_e_init.shape[0], 1, 1))
@@ -307,7 +307,7 @@ class Smoe:
 
         n_exp = tf.exp(-0.5 * einsum('abli,alm,anm,abnj->ab', x_sub_mu, A, A, x_sub_mu))
 
-        if use_determinant:
+        if self.use_determinant:
             n_div = tf.reduce_prod(tf.matrix_diag_part(A), axis=-1)
             p = self.image.ndim - 1
             n_dis = np.sqrt(np.power(2 * np.pi, p))
