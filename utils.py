@@ -11,7 +11,7 @@ def reduce_params(params):
     params['nu_e'] = params['nu_e'][idx]
     params['gamma_e'] = params['gamma_e'][idx]
     params['musX'] = params['musX'][idx]
-    return params
+    return params, idx
 
 
 def save_model(smoe, path, best=False, reduce=True, quantize=True):
@@ -20,7 +20,7 @@ def save_model(smoe, path, best=False, reduce=True, quantize=True):
     else:
         params = smoe.get_params()
     if reduce:
-        params = reduce_params(params)
+        params, bool_idx = reduce_params(params)
 
     mses = smoe.get_mses()
     losses = smoe.get_losses()
@@ -30,7 +30,7 @@ def save_model(smoe, path, best=False, reduce=True, quantize=True):
           'quantization_mode': smoe.quantization_mode, 'quantized_pis': smoe.quantize_pis,
           'lower_bounds': smoe.lower_bounds, 'upper_bounds': smoe.upper_bounds,
           'use_yuv': smoe.use_yuv, 'only_y_gamma': smoe.only_y_gamma, 'ssim_opt': smoe.ssim_opt,
-          'use_determinant': smoe.use_determinant}
+          'use_determinant': smoe.use_determinant, 'use_diff_center': smoe.use_diff_center}
 
     if quantize:
         qparams = smoe.qparams
@@ -44,8 +44,11 @@ def save_model(smoe, path, best=False, reduce=True, quantize=True):
         qparams.update({'radial_as': smoe.radial_as})
         qparams.update({'trained_pis': smoe.train_pis})
         qparams.update({'use_yuv': smoe.use_yuv})
-        params.update({'only_y_gamma': smoe.only_y_gamma})
-        params.update({'use_determinant': smoe.use_determinant})
+        qparams.update({'only_y_gamma': smoe.only_y_gamma})
+        qparams.update({'use_determinant': smoe.use_determinant})
+        qparams.update({'use_diff_center': smoe.use_diff_center})
+        if reduce:
+            qparams.update({'used_kernels': bool_idx})
         cp.update({'qparams': qparams})
 
     with open(path, 'wb') as fd:

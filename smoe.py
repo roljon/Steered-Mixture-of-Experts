@@ -8,13 +8,14 @@ from quantizer import quantize_params, rescaler
 
 class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1,
-                 train_gammas=True, train_musx=True, radial_as=False, use_determinant=False, normalize_pis=True, quantization_mode=0,
-                 bit_depths=None, quantize_pis=True, lower_bounds=None, upper_bounds=None, use_yuv=True,
-                 only_y_gamma=False, ssim_opt=False, iter_offset=0, margin=0.5):
+                 train_gammas=True, train_musx=True, use_diff_center=False, radial_as=False, use_determinant=False,
+                 normalize_pis=True, quantization_mode=0, bit_depths=None, quantize_pis=True, lower_bounds=None,
+                 upper_bounds=None, use_yuv=True, only_y_gamma=False, ssim_opt=False, iter_offset=0, margin=0.5):
         self.batch_shape = None
         self.use_yuv = use_yuv
         self.only_y_gamma = only_y_gamma
         self.ssim_opt = ssim_opt
+        self.use_diff_center = use_diff_center
 
         # init params
         self.pis_init = None
@@ -148,7 +149,11 @@ class Smoe:
 
         self.nu_e_var = tf.Variable(nu_e_init, dtype=tf.float32)
         self.gamma_e_var = tf.Variable(gamma_e_init, trainable=self.train_gammas, dtype=tf.float32)
-        self.musX_var = tf.Variable(musX_init, trainable=self.train_musx, dtype=tf.float32)
+        if self.use_diff_center:
+            self.musX_var = tf.Variable(np.zeros_like(musX_init), trainable=self.train_musx, dtype=tf.float32)
+            musX_grid = tf.constant(musX_init, dtype=tf.float32)
+        else:
+            self.musX_var = tf.Variable(musX_init, trainable=self.train_musx, dtype=tf.float32)
         #self.A_var = tf.Variable(A_init, dtype=tf.float32)
         self.pis_var = tf.Variable(pis_init, trainable=self.train_pis, dtype=tf.float32)
 
@@ -284,8 +289,12 @@ class Smoe:
         self.indices = tf.constant(np.arange(self.start_pis), dtype=tf.int32)
         self.indices = tf.boolean_mask(self.indices, bool_mask)
 
+
         # using self-Variables to define feed point
-        self.musX = tf.boolean_mask(self.qmusX, bool_mask)
+        if self.use_diff_center:
+            self.musX = tf.boolean_mask(self.qmusX + musX_grid, bool_mask)
+        else:
+            self.musX = tf.boolean_mask(self.qmusX, bool_mask)
         self.nu_e = tf.boolean_mask(self.qnu_e, bool_mask)
         self.gamma_e = tf.boolean_mask(self.qgamma_e, bool_mask)
         self.A = tf.boolean_mask(A, bool_mask)

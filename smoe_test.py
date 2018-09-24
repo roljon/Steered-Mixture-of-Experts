@@ -17,8 +17,8 @@ from utils import save_model, load_params, read_image
 
 
 def main(image_path, results_path, iterations, validation_iterations, kernels_per_dim, params_file, l1reg, base_lr,
-         batches, checkpoint_path, lr_div, lr_mult, disable_train_pis, disable_train_gammas, disable_train_musx, 
-         radial_as, use_determinant, normalize_pis, quantization_mode, bit_depths, quantize_pis, lower_bounds,
+         batches, checkpoint_path, lr_div, lr_mult, disable_train_pis, disable_train_gammas, disable_train_musx,
+         use_diff_center, radial_as, use_determinant, normalize_pis, quantization_mode, bit_depths, quantize_pis, lower_bounds,
          upper_bounds, use_yuv, only_y_gamma, ssim_opt):
 
     if len(bit_depths) != 5:
@@ -49,7 +49,7 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
     logger = ModelLogger(path=results_path, as_media=True)
 
     smoe = Smoe(orig, kernels_per_dim, init_params=init_params, train_pis=not disable_train_pis,
-                train_gammas=not disable_train_gammas, train_musx=not disable_train_musx, radial_as=radial_as, start_batches=batches,
+                train_gammas=not disable_train_gammas, train_musx=not disable_train_musx, use_diff_center=use_diff_center, radial_as=radial_as, start_batches=batches,
                 use_determinant=use_determinant, normalize_pis=normalize_pis, quantization_mode=quantization_mode,
                 bit_depths=bit_depths, quantize_pis=quantize_pis, lower_bounds=lower_bounds, upper_bounds=upper_bounds,
                 use_yuv=use_yuv, only_y_gamma=only_y_gamma, ssim_opt=ssim_opt)
@@ -101,7 +101,9 @@ if __name__ == '__main__':
     parser.add_argument('-dg', '--disable_train_gammas', type=str2bool, nargs='?',
                         const=False, default=False, help="disable_train_gammas")
     parser.add_argument('-dm', '--disable_train_musx', type=str2bool, nargs='?',
-                        const=False, default=False, help="disable_train_gammas")
+                        const=False, default=False, help="disable_train_musX")
+    parser.add_argument('-udc', '--use_diff_center', type=str2bool, nargs='?',
+                        const=False, default=False, help="train deviations of mesh grid centers")
     parser.add_argument('-ra', '--radial_as', type=str2bool, nargs='?',
                         const=False, default=False, help="radial_as")
     parser.add_argument('-ud', '--use_determinant', type=str2bool, nargs='?',

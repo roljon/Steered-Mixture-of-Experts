@@ -3,7 +3,7 @@ from utils import reduce_params
 
 def quantize_params(smoe, params):
 
-    params = reduce_params(params)
+    params, _ = reduce_params(params)
 
     if smoe.quantization_mode <= 1 or smoe.quantization_mode == 3:
         lb_A_diagonal = np.amin(params['A_diagonal'], axis=0, keepdims=True)
@@ -137,6 +137,8 @@ def rescaler(smoe, qparams):
     else:
         rA = rA_diagonal + rA_corr
 
+    if smoe.use_diff_center:
+        rmusX += smoe.musX_init
 
     rparams = {'A': rA, 'musX': rmusX, 'nu_e': rnu_e, 'pis': rpis, 'gamma_e': rgamma_e}
 
