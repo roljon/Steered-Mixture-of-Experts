@@ -138,6 +138,7 @@ class Smoe:
         self.start_pis = self.pis_init.size
         self.margin = margin
         self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches
+        self.random_sampling_per_batch = [np.ones((np.prod(self.joint_domain_batched.shape[1:3]),), dtype=np.float32) / np.prod(self.joint_domain_batched.shape[1:3])] * self.start_batches
 
         gpu_options = tf.GPUOptions(allow_growth=True)
         self.session = tf.InteractiveSession(config=tf.ConfigProto(gpu_options=gpu_options))
@@ -252,7 +253,7 @@ class Smoe:
         num_channels = gamma_e_init.shape[-1]
 
 
-        self.joint_domain_batched_op = tf.placeholder(shape=(np.prod(self.batch_shape[:-1]), self.dim_domain + num_channels), dtype=tf.float32)
+        self.joint_domain_batched_op = tf.placeholder(shape=(None, self.dim_domain + num_channels), dtype=tf.float32)
 
 
         self.target_op = self.joint_domain_batched_op[:, self.dim_domain:]
@@ -364,6 +365,8 @@ class Smoe:
         self.res = tf.fake_quant_with_min_max_args(self.res, min=0, max=1, num_bits=8)
         #mse = tf.reduce_mean(tf.square(tf.round(self.res * 255) / 255 - self.target_op))
         mse = tf.reduce_mean(tf.square(self.res - self.target_op))
+        err_map = tf.reduce_mean(tf.square(self.res - self.target_op), axis=1)
+        self.sampl_prob = err_map / tf.reduce_sum(err_map)
 
         if not self.ssim_opt:
             # margin in pixel to determine epsilon
@@ -526,7 +529,7 @@ class Smoe:
         self.session.run(init_new_vars_op)
 
     def train(self, num_iter, val_iter=100, optimizer1=None, optimizer2=None, optimizer3=None, grad_clip_value_abs=None, pis_l1=0,
-              u_l1=0, callbacks=()):
+              u_l1=0, sampling_percentage=100, callbacks=()):
         if optimizer1:
             self.set_optimizer(optimizer1, optimizer2, optimizer3, grad_clip_value_abs=grad_clip_value_abs)
         assert self.optimizer1 is not None, "no optimizer found, you have to specify one!"
@@ -562,7 +565,7 @@ class Smoe:
                 validate = i % val_iter == 0
 
                 loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=True,
-                                                             update_reconstruction=False)
+                                                             update_reconstruction=False, sampling_percentage=sampling_percentage)
 
                 if validate:
                     self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches
@@ -617,7 +620,7 @@ class Smoe:
         print("end loss/mse: ", loss_val, "/", mse_val, "@iter: ", i)
         print("best loss/mse: ", self.best_loss, "/", self.best_mse)
 
-    def run_batched(self, pis_l1=0, u_l1=0, train=True, update_reconstruction=False, with_quantized_params=False):
+    def run_batched(self, pis_l1=0, u_l1=0, train=True, update_reconstruction=False, with_quantized_params=False, sampling_percentage=100):
         self.valid = False
         if with_quantized_params:
             self.qvalid = False
@@ -644,7 +647,15 @@ class Smoe:
         bar = progressbar.ProgressBar(widgets=widgets)
         for ii in bar(range(self.start_batches)):
             retrieve = [self.loss_op, self.mse_op, self.num_pi_op, self.indices]
-            feed_dict = {self.joint_domain_batched_op: self.joint_domain_batched[ii].reshape(-1, self.joint_domain_batched[ii].shape[-1]), self.pis_l1: pis_l1, self.u_l1: u_l1,
+
+            img_patch = self.joint_domain_batched[ii].reshape(-1, self.joint_domain_batched[ii].shape[-1])
+            if train and not self.ssim_opt:
+                num_samples = np.uint32(np.round(img_patch.shape[0] * sampling_percentage/100))
+                samples = np.random.choice(img_patch.shape[0], (num_samples,), replace=False, p=self.random_sampling_per_batch[ii])
+            else:
+                samples = np.arange(img_patch.shape[0])
+
+            feed_dict = {self.joint_domain_batched_op: img_patch[samples, :], self.pis_l1: pis_l1, self.u_l1: u_l1,
                          self.kernel_list: self.kernel_list_per_batch[ii]}
             if train:
                 retrieve.append(self.accum_ops)
@@ -652,6 +663,8 @@ class Smoe:
                 retrieve += [self.res, self.w_e_max_op]
                 if with_quantized_params:
                     feed_dict.update({self.A: self.rparams["A"], self.musX: self.rparams["musX"], self.nu_e: self.rparams["nu_e"], self.gamma_e: self.rparams["gamma_e"], self.pis: self.rparams["pis"]})
+
+            retrieve.append(self.sampl_prob)
 
             results = self.session.run(retrieve, feed_dict=feed_dict)
             if update_reconstruction:
@@ -674,6 +687,7 @@ class Smoe:
         if update_reconstruction:
             reconstruction = np.stack(reconstructions)
             w_e = np.stack(w_es)
+            self.random_sampling_per_batch[ii] = results[-1]
             if not with_quantized_params:
                 self.reconstruction_image = self.uncubify(reconstruction, self.image.shape)
                 self.weight_matrix_argmax = self.uncubify(w_e, self.image.shape[0:self.image.ndim-1])

@@ -19,10 +19,16 @@ from utils import save_model, load_params, read_image
 def main(image_path, results_path, iterations, validation_iterations, kernels_per_dim, params_file, l1reg, base_lr,
          batches, checkpoint_path, lr_div, lr_mult, disable_train_pis, disable_train_gammas, disable_train_musx,
          use_diff_center, radial_as, use_determinant, normalize_pis, quantization_mode, bit_depths, quantize_pis, lower_bounds,
-         upper_bounds, use_yuv, only_y_gamma, ssim_opt):
+         upper_bounds, use_yuv, only_y_gamma, ssim_opt, sampling_percentage):
 
     if len(bit_depths) != 5:
         raise ValueError("Number of bit depths must be five!")
+
+    if ssim_opt:
+        sampling_percentage = 100
+
+    if sampling_percentage <= 0 or sampling_percentage > 100:
+        raise ValueError("Value of Sampling Percentage must be in range (0,100]")
 
     if quantization_mode >= 2:
         quantize_pis = True
@@ -66,7 +72,7 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
     if checkpoint_path is not None:
         smoe.restore(checkpoint_path)
 
-    smoe.train(iterations, val_iter=validation_iterations, pis_l1=l1reg,
+    smoe.train(iterations, val_iter=validation_iterations, pis_l1=l1reg, sampling_percentage=sampling_percentage,
                callbacks=[loss_plotter.plot, image_plotter.plot, logger.log])
 
     save_model(smoe, results_path + "/params_best.pkl", best=True)
@@ -133,6 +139,7 @@ if __name__ == '__main__':
     parser.add_argument('-ssim', '--ssim_opt', type=str2bool, nargs='?',
                         const=False, default=False,
                         help="SSIM optimization instead of MSE.")
+    parser.add_argument('-sp', '--sampling_percentage', type=int, default=100, help="How many samples were used for each update step in percentage")
 
     args = parser.parse_args()
 
