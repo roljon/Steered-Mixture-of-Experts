@@ -167,24 +167,10 @@ class Smoe:
             if A_init.ndim == 1:
                 self.A_diagonal_var = tf.Variable(A_init, dtype=tf.float32)
             else:
-                # TODO HOTFIX to make radial kernels for variable min/max quant working
-                if self.quantization_mode == 3:
-                    self.A_diagonal_var = tf.Variable(A_init[:, 0, 0]
-                                                      + np.random.randint(0, 100, (A_init.shape[0],)) * 1,
-                                                      dtype=tf.float32)
-                else:
-                    self.A_diagonal_var = tf.Variable(A_init[:, 0, 0], dtype=tf.float32)
+                self.A_diagonal_var = tf.Variable(A_init[:, 0, 0], dtype=tf.float32)
             self.A_corr_var = tf.Variable(np.zeros_like(A_init), trainable=False, dtype=tf.float32)
         else:
-            # TODO Hotfix
-            if self.quantization_mode == 3:
-                mask = np.zeros((self.dim_domain, self.dim_domain))
-                np.fill_diagonal(mask, 1)
-                mask = np.tile(mask, (A_init.shape[0], 1, 1))
-                noise_matrix = np.random.randint(0, 100, A_init.shape) * mask
-                self.A_diagonal_var = tf.Variable(A_init + noise_matrix, dtype=tf.float32)
-            else:
-                self.A_diagonal_var = tf.Variable(A_init, dtype=tf.float32)
+            self.A_diagonal_var = tf.Variable(A_init, dtype=tf.float32)
             self.A_corr_var = tf.Variable(np.zeros_like(A_init), dtype=tf.float32)
 
         # Quantization of parameters (if requested)
@@ -213,15 +199,19 @@ class Smoe:
                                                             num_bits=self.bit_depths[4])
         elif self.quantization_mode == 3:
             if self.radial_as:
-                self.qA_diagonal = tf.fake_quant_with_min_max_vars(self.A_diagonal_var,
-                                                                   min=tf.reduce_min(tf.boolean_mask(self.A_diagonal_var, pis_mask)),
-                                                                   max=tf.reduce_max(tf.boolean_mask(self.A_diagonal_var, pis_mask)),
-                                                                   num_bits=self.bit_depths[0])
+                min_A_diagonal = tf.reduce_min(tf.boolean_mask(self.A_diagonal_var, pis_mask))
+                max_A_diagonal = tf.reduce_max(tf.boolean_mask(self.A_diagonal_var, pis_mask))
+                qA_diagonal = tf.fake_quant_with_min_max_vars(self.A_diagonal_var, min=0,
+                                                              max=max_A_diagonal - min_A_diagonal,
+                                                              num_bits=self.bit_depths[0])
+                self.qA_diagonal = qA_diagonal + min_A_diagonal
             else:
-                self.qA_diagonal = tf.fake_quant_with_min_max_vars(self.A_diagonal_var,
-                                                                   min=tf.reduce_min(tf.matrix_diag_part(tf.boolean_mask(self.A_diagonal_var, pis_mask))),
-                                                                   max=tf.reduce_max(tf.matrix_diag_part(tf.boolean_mask(self.A_diagonal_var, pis_mask))),
-                                                                   num_bits=self.bit_depths[0])
+                min_A_diagonal = tf.reduce_min(tf.matrix_diag_part(tf.boolean_mask(self.A_diagonal_var, pis_mask)))
+                max_A_diagonal = tf.reduce_max(tf.matrix_diag_part(tf.boolean_mask(self.A_diagonal_var, pis_mask)))
+                qA_diagonal = tf.fake_quant_with_min_max_vars(self.A_diagonal_var - min_A_diagonal, min=0,
+                                                              max=max_A_diagonal - min_A_diagonal,
+                                                              num_bits=self.bit_depths[0])
+                self.qA_diagonal = qA_diagonal + min_A_diagonal
             self.qA_corr = tf.fake_quant_with_min_max_vars(self.A_corr_var,
                                                            min=tf.reduce_min(tf.boolean_mask(self.A_corr_var, pis_mask)),
                                                            max=tf.reduce_max(tf.boolean_mask(self.A_corr_var, pis_mask)),
@@ -233,10 +223,12 @@ class Smoe:
                                                              num_bits=self.bit_depths[1])
             else:
                 self.qmusX = self.musX_var
-            self.qnu_e = tf.fake_quant_with_min_max_vars(self.nu_e_var,
-                                                         min=tf.reduce_min(tf.boolean_mask(self.nu_e_var, pis_mask)),
-                                                         max=tf.reduce_max(tf.boolean_mask(self.nu_e_var, pis_mask)),
-                                                         num_bits=self.bit_depths[2])
+
+            min_nu_e = tf.reduce_min(tf.boolean_mask(self.nu_e_var, pis_mask))
+            max_nu_e = tf.reduce_max(tf.boolean_mask(self.nu_e_var, pis_mask))
+            qnu_e = tf.fake_quant_with_min_max_vars(self.nu_e_var - min_nu_e, min=0, max=max_nu_e-min_nu_e, num_bits=self.bit_depths[2])
+            self.qnu_e = qnu_e + min_nu_e
+
             self.qgamma_e = tf.fake_quant_with_min_max_vars(self.gamma_e_var,
                                                             min=tf.reduce_min(tf.boolean_mask(self.gamma_e_var, pis_mask)),
                                                             max=tf.reduce_max(tf.boolean_mask(self.gamma_e_var, pis_mask)),
@@ -646,10 +638,12 @@ class Smoe:
         ]
         bar = progressbar.ProgressBar(widgets=widgets)
         for ii in bar(range(self.start_batches)):
-            retrieve = [self.loss_op, self.mse_op, self.num_pi_op, self.indices]
+            retrieve = [self.loss_op, self.mse_op, self.num_pi_op]
+            if not with_quantized_params:
+                retrieve.append(self.indices)
 
             img_patch = self.joint_domain_batched[ii].reshape(-1, self.joint_domain_batched[ii].shape[-1])
-            if train and not self.ssim_opt:
+            if train and not self.ssim_opt and sampling_percentage < 100:
                 num_samples = np.uint32(np.round(img_patch.shape[0] * sampling_percentage/100))
                 samples = np.random.choice(img_patch.shape[0], (num_samples,), replace=False, p=self.random_sampling_per_batch[ii])
             else:
@@ -672,9 +666,12 @@ class Smoe:
                     reconstructions.append(results[5])
                     w_es.append(results[6])
                 else:
-                    reconstructions.append(results[4])
-                    #remapped_wes = self.remap_kernel_indices(results[5], results[3])
-                    w_es.append(results[5])
+                    if with_quantized_params:
+                        reconstructions.append(results[3])
+                        w_es.append(results[4])
+                    else:
+                        reconstructions.append(results[4])
+                        w_es.append(results[5])
 
             loss_val += results[0] * np.prod(self.joint_domain_batched.shape[1:-1]) / self.num_pixel
             mse_val += results[1] * np.prod(self.joint_domain_batched.shape[1:-1]) / self.num_pixel
