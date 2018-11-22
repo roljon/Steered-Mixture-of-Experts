@@ -9,7 +9,7 @@ from quantizer import quantize_params, rescaler
 class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1,
                  train_gammas=True, train_musx=True, use_diff_center=False, radial_as=False, use_determinant=False,
-                 normalize_pis=True, quantization_mode=0, bit_depths=None, quantize_pis=True, lower_bounds=None,
+                 normalize_pis=True, quantization_mode=0, bit_depths=None, quantize_pis=False, lower_bounds=None,
                  upper_bounds=None, use_yuv=True, only_y_gamma=False, ssim_opt=False, iter_offset=0, margin=0.5):
         self.batch_shape = None
         self.use_yuv = use_yuv
