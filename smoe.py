@@ -330,14 +330,18 @@ class Smoe:
         self.indices = tf.boolean_mask(self.indices, kernel_list_batch_op)
         #self.indices = tf.Print(self.indices, [tf.count_nonzero(kernel_list_batch_op)])
 
-        # TODO reorder nu_e and gamma_e to avoid unnecessary transpositions
-        domain_tiled = tf.expand_dims(tf.transpose(self.domain_op), axis=0)
-        domain_tiled = tf.tile(domain_tiled, (num_channels, 1, 1))
-        sloped_out = tf.matmul(tf.transpose(gamma_e, perm=[2, 0, 1]), domain_tiled)
-        nu_e = tf.expand_dims(tf.transpose(nu_e), axis=-1)
-        self.res = tf.reduce_sum(self.w_e_op * (sloped_out + nu_e), axis=1)
 
-        self.res = tf.minimum(tf.maximum(self.res, 0), 1)
+        nu_e = tf.expand_dims(tf.transpose(nu_e), axis=-1)
+        if self.train_gammas:
+            # TODO reorder nu_e and gamma_e to avoid unnecessary transpositions
+            domain_tiled = tf.expand_dims(tf.transpose(self.domain_op), axis=0)
+            domain_tiled = tf.tile(domain_tiled, (num_channels, 1, 1))
+            sloped_out = tf.matmul(tf.transpose(gamma_e, perm=[2, 0, 1]), domain_tiled)
+            self.res = tf.reduce_sum(self.w_e_op * (sloped_out + nu_e), axis=1)
+        else:
+            self.res = tf.reduce_sum(self.w_e_op * nu_e, axis=1)
+
+        self.res = tf.clip_by_value(self.res, 0, 1)
         self.res = tf.transpose(self.res)
 
         # checkpoint op
