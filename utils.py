@@ -103,8 +103,6 @@ def read_image(path, use_yuv=True):
             for ii in range(orig.shape[0]):
                 for jj in range(orig.shape[1]):
                     orig[ii, jj, :, :, :] = cv2.cvtColor(orig[ii, jj, :, :, :], cv2.COLOR_RGB2YUV)
-
-
     elif path.lower().endswith('.yuv'):
         # TODO read raw video by OpenCV
         raise ValueError("Raw Video Data is not supported yet!")
@@ -113,13 +111,18 @@ def read_image(path, use_yuv=True):
 
     if orig.dtype == np.uint8:
         orig = orig.astype(np.float32) / 255.
+        precision = 8
     elif orig.dtype == np.uint16:
         orig = orig.astype(np.float32) / 2**16.
+        precision = 16
 
-    return orig
+    return orig, precision
 
-def write_image(img, path, type, yuv):
-    img = np.uint8(np.round(img * 255))
+def write_image(img, path, type, yuv, precision):
+    if precision == 8:
+        img = np.uint8(np.round(img * 255))
+    elif precision == 16:
+        img = np.uint16(np.round(img * 2**precision))
     if type == 2:
         if yuv:
             img = cv2.cvtColor(img, cv2.COLOR_YUV2BGR)

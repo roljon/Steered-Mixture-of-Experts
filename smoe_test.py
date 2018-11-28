@@ -33,7 +33,7 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
     if quantization_mode >= 2:
         quantize_pis = True
 
-    orig = read_image(image_path, use_yuv)
+    orig, precision = read_image(image_path, use_yuv)
 
     if not orig.shape[-1] == 3:
         use_yuv = False
@@ -58,7 +58,7 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
                 train_gammas=not disable_train_gammas, train_musx=not disable_train_musx, use_diff_center=use_diff_center, radial_as=radial_as, start_batches=batches,
                 use_determinant=use_determinant, normalize_pis=normalize_pis, quantization_mode=quantization_mode,
                 bit_depths=bit_depths, quantize_pis=quantize_pis, lower_bounds=lower_bounds, upper_bounds=upper_bounds,
-                use_yuv=use_yuv, only_y_gamma=only_y_gamma, ssim_opt=ssim_opt)
+                use_yuv=use_yuv, only_y_gamma=only_y_gamma, ssim_opt=ssim_opt, precision=precision)
 
 
 

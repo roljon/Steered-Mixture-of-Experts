@@ -11,8 +11,8 @@ import cv2
 mpl.rcParams['image.cmap'] = 'jet'
 
 
-def psnr(mse):
-    return 10 * np.log10(255 ** 2 / mse)
+def psnr(mse, precision):
+    return 10 * np.log10((2**precision) ** 2 / mse)
 
 
 class ImagePlotter:
@@ -90,7 +90,7 @@ class ImagePlotter:
                 elif smoe.dim_domain == 4:
                     img = img[int(img.shape[0]/2), int(img.shape[1]/2), :, :, :]
                 if img.ndim == 3 and smoe.use_yuv:
-                    img = cv2.cvtColor(np.uint8(np.round(img * 255)), cv2.COLOR_YUV2RGB)
+                    img = cv2.cvtColor(img, cv2.COLOR_YUV2RGB)
                 elif img.ndim == 3 and not smoe.use_yuv:
                     img = img[:, :, ::-1]
                 ax.imshow(img, cmap='gray', interpolation='None', vmin=0, vmax=1)
@@ -104,7 +104,7 @@ class ImagePlotter:
                 elif smoe.dim_domain == 4:
                     img = img[int(img.shape[0]/2), int(img.shape[1]/2), :, :, :]
                 if img.ndim == 3 and smoe.use_yuv:
-                    img = cv2.cvtColor(np.uint8(np.round(img * 255)), cv2.COLOR_YUV2RGB)
+                    img = cv2.cvtColor(img, cv2.COLOR_YUV2RGB)
                 elif img.ndim == 3 and not smoe.use_yuv:
                     img = img[:, :, ::-1]
                 ax.imshow(img, cmap='gray', interpolation='None', vmin=0, vmax=1)
@@ -137,9 +137,9 @@ class ImagePlotter:
                                                                           mses[0],
                                                                           smoe.get_best_mse(),
                                                                           mses[-1],
-                                                                          psnr(mses[0]),
-                                                                          psnr(smoe.get_best_mse()),
-                                                                          psnr(mses[-1])),
+                                                                          psnr(mses[0], smoe.precision),
+                                                                          psnr(smoe.get_best_mse(), smoe.precision),
+                                                                          psnr(mses[-1], smoe.precision)),
             y=1.)
 
         if not self.quiet:
@@ -213,9 +213,9 @@ class LossPlotter:
                                                                           mses[0],
                                                                           smoe.get_best_mse(),
                                                                           mses[-1],
-                                                                          psnr(mses[0]),
-                                                                          psnr(smoe.get_best_mse()),
-                                                                          psnr(mses[-1]))
+                                                                          psnr(mses[0], smoe.precision),
+                                                                          psnr(smoe.get_best_mse(), smoe.precision),
+                                                                          psnr(mses[-1], smoe.precision))
         )
         self.ax_loss.plot(iters_loss, losses, color='b')
         self.ax_mse.plot(iters_mse, mses, color='r')
