@@ -87,6 +87,8 @@ class ImagePlotter:
                         img = img[:, :, 0, :]
                     else:
                         img = img[:, :, 0]
+                elif smoe.dim_domain == 4:
+                    img = img[int(img.shape[0]/2), int(img.shape[1]/2), :, :, :]
                 if img.ndim == 3 and smoe.use_yuv:
                     img = cv2.cvtColor(np.uint8(np.round(img * 255)), cv2.COLOR_YUV2RGB)
                 elif img.ndim == 3 and not smoe.use_yuv:
@@ -99,6 +101,8 @@ class ImagePlotter:
                         img = img[:, :, 0, :]
                     else:
                         img = img[:, :, 0]
+                elif smoe.dim_domain == 4:
+                    img = img[int(img.shape[0]/2), int(img.shape[1]/2), :, :, :]
                 if img.ndim == 3 and smoe.use_yuv:
                     img = cv2.cvtColor(np.uint8(np.round(img * 255)), cv2.COLOR_YUV2RGB)
                 elif img.ndim == 3 and not smoe.use_yuv:
@@ -106,8 +110,10 @@ class ImagePlotter:
                 ax.imshow(img, cmap='gray', interpolation='None', vmin=0, vmax=1)
             elif option == "gating":
                 w_e_opt = smoe.get_weight_matrix_argmax()
-                if w_e_opt.ndim > 2:
+                if smoe.dim_domain == 3:
                     w_e_opt = w_e_opt[:, :, 0]
+                elif smoe.dim_domain == 4:
+                    w_e_opt = w_e_opt[int(w_e_opt.shape[0]/2), int(w_e_opt.shape[1]/2), :, :]
                 ax.imshow(w_e_opt, interpolation='None', cmap='prism')
             elif option == "pis_hist":
                 # TODO hist hotfix

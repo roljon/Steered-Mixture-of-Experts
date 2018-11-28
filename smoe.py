@@ -138,7 +138,7 @@ class Smoe:
         self.start_pis = self.pis_init.size
         self.margin = margin
         self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches
-        self.random_sampling_per_batch = [np.ones((np.prod(self.joint_domain_batched.shape[1:3]),), dtype=np.float32) / np.prod(self.joint_domain_batched.shape[1:3])] * self.start_batches
+        self.random_sampling_per_batch = [np.ones((np.prod(self.joint_domain_batched.shape[1:self.dim_domain+1]),), dtype=np.float32) / np.prod(self.joint_domain_batched.shape[1:self.dim_domain+1])] * self.start_batches
 
         gpu_options = tf.GPUOptions(allow_growth=True)
         self.session = tf.InteractiveSession(config=tf.ConfigProto(gpu_options=gpu_options))
@@ -811,8 +811,8 @@ class Smoe:
                 height, width = self.image.shape[0], self.image.shape[1]
                 mean = np.empty((self.musX_init.shape[0], num_channels), dtype=np.float32)
                 for k, (y, x) in enumerate(zip(*self.musX_init.T)):
-                    x0 = int(round((x - stride[0]) * width))
-                    x1 = int(round((x + stride[0]) * width))
+                    x0 = int(round((x - stride[1]) * width))
+                    x1 = int(round((x + stride[1]) * width))
                     y0 = int(round((y - stride[0]) * height))
                     y1 = int(round((y + stride[0]) * height))
 
@@ -822,14 +822,30 @@ class Smoe:
                 height, width, frames = self.image.shape[0], self.image.shape[1], self.image.shape[2]
                 mean = np.empty((self.musX_init.shape[0], num_channels), dtype=np.float32)
                 for k, (y, x, z) in enumerate(zip(*self.musX_init.T)):
-                    x0 = int(round((x - stride[0]) * width))
-                    x1 = int(round((x + stride[0]) * width))
-                    y0 = int(round((y - stride[1]) * height))
-                    y1 = int(round((y + stride[1]) * height))
+                    x0 = int(round((x - stride[1]) * width))
+                    x1 = int(round((x + stride[1]) * width))
+                    y0 = int(round((y - stride[0]) * height))
+                    y1 = int(round((y + stride[0]) * height))
                     z0 = int(round((z - stride[2]) * frames))
                     z1 = int(round((z + stride[2]) * frames))
 
                     mean[k] = np.mean(self.image[y0:y1, x0:x1, z0:z1], axis=(0, 1, 2))
+            elif self.dim_domain == 4:
+                stride = self.musX_init[0]
+                num_disp_1, num_disp_2, height, width = self.image.shape[0], self.image.shape[1], self.image.shape[2], self.image.shape[3]
+                mean = np.empty((self.musX_init.shape[0], num_channels), dtype=np.float32)
+                for k, (a1, a2, y, x) in enumerate(zip(*self.musX_init.T)):
+                    x0 = int(round((x - stride[3]) * width))
+                    x1 = int(round((x + stride[3]) * width))
+                    y0 = int(round((y - stride[2]) * height))
+                    y1 = int(round((y + stride[2]) * height))
+                    a10 = int(round((a1 - stride[0]) * num_disp_1))
+                    a11 = int(round((a1 + stride[0]) * num_disp_1))
+                    a20 = int(round((a2 - stride[1]) * num_disp_2))
+                    a21 = int(round((a2 + stride[1]) * num_disp_2))
+
+                    mean[k] = np.mean(self.image[a10:a11, a20:a21, y0:y1, x0:x1], axis=(0, 1, 2, 3))
+
             '''    
             stride = self.musX_init[0, :]
             size_of_img = self.image.shape

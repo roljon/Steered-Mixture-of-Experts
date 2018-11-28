@@ -2,6 +2,7 @@ import pickle
 import numpy as np
 import matplotlib.pyplot as plt
 import cv2
+import hdf5storage
 
 def reduce_params(params):
     idx = params['pis'] > 0
@@ -95,6 +96,14 @@ def read_image(path, use_yuv=True):
         if np.sum(b1.flatten()) > np.prod(orig.shape[0:3]) * 0.9:  # Experimental!!
             orig = orig[:, :, :, 0]
             orig = np.expand_dims(orig, axis=-1)
+    elif path.lower().endswith('.mat'):
+        orig = hdf5storage.loadmat(path)["LF"]
+        orig = orig[:, :, :, :, 0:3]
+        if use_yuv:
+            for ii in range(orig.shape[0]):
+                for jj in range(orig.shape[1]):
+                    orig[ii, jj, :, :, :] = cv2.cvtColor(orig[ii, jj, :, :, :], cv2.COLOR_RGB2YUV)
+
 
     elif path.lower().endswith('.yuv'):
         # TODO read raw video by OpenCV
@@ -104,6 +113,8 @@ def read_image(path, use_yuv=True):
 
     if orig.dtype == np.uint8:
         orig = orig.astype(np.float32) / 255.
+    elif orig.dtype == np.uint16:
+        orig = orig.astype(np.float32) / 2**16.
 
     return orig
 
@@ -123,3 +134,11 @@ def write_image(img, path, type, yuv):
                 frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR)
             out.write(frame)
         out.release()
+    elif type == 4:
+        if yuv:
+            for ii in range(img.shape[0]):
+                for jj in range(img.shape[1]):
+                    img[ii, jj, :, :, :] = cv2.cvtColor(img[ii, jj, :, :, :], cv2.COLOR_YUV2RGB)
+        mat = {}
+        mat['LF'] = img
+        hdf5storage.write(mat, '/', path + ".mat", matlab_compatible=True)
