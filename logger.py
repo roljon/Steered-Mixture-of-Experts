@@ -32,10 +32,10 @@ class ModelLogger:
                    quantize=True if (smoe.quantization_mode >= 1) else False)
 
         if self.as_media:
-            write_image(reconstruction, self.reconstruction_path + "/{0:08d}_reconstruction".format(iter_), smoe.dim_domain, smoe.use_yuv)
+            write_image(reconstruction, self.reconstruction_path + "/{0:08d}_reconstruction".format(iter_), smoe.dim_domain, smoe.use_yuv, smoe.precision)
             if smoe.quantization_mode == 1:
                 qreconstruction = smoe.get_qreconstruction()
-                write_image(qreconstruction, self.reconstruction_path + "/{0:08d}_qreconstruction".format(iter_), smoe.dim_domain, smoe.use_yuv)
+                write_image(qreconstruction, self.reconstruction_path + "/{0:08d}_qreconstruction".format(iter_), smoe.dim_domain, smoe.use_yuv, smoe.precision)
         else:
             np.save(self.reconstruction_path + "/{0:08d}_reconstruction.npy".format(iter_), reconstruction)
             if smoe.quantization_mode == 1:
