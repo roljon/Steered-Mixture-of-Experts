@@ -3,7 +3,7 @@ import math
 import tensorflow as tf
 from tensorflow.python.ops.special_math_ops import _exponential_space_einsum as einsum
 import progressbar
-from itertools import product
+from itertools import product, combinations
 from quantizer import quantize_params, rescaler
 
 class Smoe:
@@ -119,6 +119,7 @@ class Smoe:
         self.dim_domain = image.ndim - 1
         self.num_pixel = np.prod(image.shape[0:self.dim_domain])
         self.init_domain_and_target()
+        self.neighboring_batches_ind = self.find_neighboring_indices(self.image.shape, self.joint_domain_batched.shape)
         self.batches = start_batches
         self.start_batches = self.joint_domain_batched.shape[0]
 
@@ -138,7 +139,7 @@ class Smoe:
 
         self.start_pis = self.pis_init.size
         self.margin = margin
-        self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches
+
         self.random_sampling_per_batch = [np.ones((np.prod(self.joint_domain_batched.shape[1:self.dim_domain+1]),), dtype=np.float32) / np.prod(self.joint_domain_batched.shape[1:self.dim_domain+1])] * self.start_batches
 
         gpu_options = tf.GPUOptions(allow_growth=True)
@@ -146,7 +147,7 @@ class Smoe:
         # self.session = tf.Session()
 
         self.init_model(self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init)
-
+        self.initialize_kernel_list()
     def init_model(self, nu_e_init, gamma_e_init, pis_init, musX_init, A_init):
 
         self.nu_e_var = tf.Variable(nu_e_init, dtype=tf.float32)
@@ -308,7 +309,9 @@ class Smoe:
 
         x_sub_mu = tf.expand_dims(domain_exp - musX, axis=-1)
 
-        n_exp = tf.exp(-0.5 * einsum('abli,alm,anm,abnj->ab', x_sub_mu, A, A, x_sub_mu))
+        self.maha_dist = einsum('abli,alm,anm,abnj->ab', x_sub_mu, A, A, x_sub_mu)
+
+        n_exp = tf.exp(-0.5 * self.maha_dist)
 
         if self.use_determinant:
             n_div = tf.reduce_prod(tf.matrix_diag_part(A), axis=-1)
@@ -327,10 +330,8 @@ class Smoe:
         self.w_e_op = n_w / n_w_norm
         self.w_e_max_op = tf.reshape(tf.argmax(self.w_e_op, axis=0), self.batch_shape[:-1])
 
-        kernel_list_batch_op = tf.reduce_sum(tf.cast(tf.greater(self.w_e_op, 0), tf.int32), axis=1) > 0 # 10 ** -9
+        kernel_list_batch_op = tf.reduce_sum(tf.cast(tf.greater(self.w_e_op, 0.5 * 1/(2**self.precision)), tf.int32), axis=1) > 0 # 10 ** -9
         self.indices = tf.boolean_mask(self.indices, kernel_list_batch_op)
-        #self.indices = tf.Print(self.indices, [tf.count_nonzero(kernel_list_batch_op)])
-
 
         nu_e = tf.expand_dims(tf.transpose(nu_e), axis=-1)
         if self.train_gammas:
@@ -565,7 +566,7 @@ class Smoe:
                                                              update_reconstruction=False, sampling_percentage=sampling_percentage)
 
                 if validate:
-                    self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches
+                    self.update_kernel_list()
                     if self.quantization_mode >= 1:
                         self.qparams = quantize_params(self, self.get_params())
                     if self.quantization_mode == 1:
@@ -876,6 +877,38 @@ class Smoe:
         else:
             self.pis_init = np.ones((number,), dtype=np.float32)
 
+    def initialize_kernel_list(self):
+        batch_center = np.mean(self.joint_domain_batched, axis=tuple(np.arange(self.dim_domain) + 1))
+
+        maha_dists = []
+        for k in range(self.joint_domain_batched.shape[0]):
+            results = self.session.run([self.maha_dist], feed_dict={self.joint_domain_batched_op:  np.expand_dims(batch_center[k], axis=0),
+                                                                 self.kernel_list: np.ones((self.start_pis,),
+                                                                                           dtype=bool)})
+            maha_dists.append(results[0])
+        maha_dists = np.concatenate(maha_dists, axis=1)
+        maha_dist_min_ind = np.argmin(maha_dists, axis=1)
+        self.kernel_list_per_batch = []
+        for k in range(self.joint_domain_batched.shape[0]):
+            self.kernel_list_per_batch.append(maha_dist_min_ind == k)
+
+        self.update_kernel_list()
+
+    def update_kernel_list(self):
+        mins = np.min(self.joint_domain_batched, axis=tuple(np.arange(self.dim_domain) + 1))
+        maxs = np.max(self.joint_domain_batched, axis=tuple(np.arange(self.dim_domain) + 1))
+        mins = mins[:, 0:self.dim_domain]
+        maxs = maxs[:, 0:self.dim_domain]
+        tt = np.concatenate((np.expand_dims(mins, axis=-1), np.expand_dims(maxs, axis=-1), np.expand_dims((mins + maxs)/2, axis=-1)), axis=-1)
+        for k in range(self.joint_domain_batched.shape[0]):
+            edges_batch = np.array(list(product(*tt[k, :, :])))
+            edges_batch = np.concatenate((edges_batch, np.zeros((edges_batch.shape[0], self.image.shape[-1]))), axis=1)
+            results = self.session.run([self.indices], feed_dict={self.joint_domain_batched_op: edges_batch, self.kernel_list: np.ones((self.start_pis,), dtype=bool)})
+            bool_mask = np.zeros((self.start_pis,), dtype=bool)
+            bool_mask[results[0]] = True
+            self.kernel_list_per_batch[k] = np.logical_or(self.kernel_list_per_batch[k], bool_mask)
+
+
     @staticmethod
     def gen_domain(in_, dim_of_input_space=2):
         num_per_dim = np.zeros((dim_of_input_space,), dtype=np.int32)
@@ -1010,7 +1043,10 @@ class Smoe:
         # determine that divisor tuple so that cubes come out as close as possible
         sum_of_dim_divisors = np.zeros((batch_shape_divisor.__len__(), 1))
         for ii, divs in enumerate(batch_shape_divisor):
-            sum_of_dim_divisors[ii] = np.sum(divs[0:2])  # also possible np.sum(divs[0:2]) to make sure that spatial blocks are more divided
+            if len(divs) > 4:
+                sum_of_dim_divisors[ii] = np.sum(divs[2:3])
+            else:
+                sum_of_dim_divisors[ii] = np.sum(divs)
 
         batch_shape_divisor = batch_shape_divisor[np.argmin(sum_of_dim_divisors)]
         new_shape = []
@@ -1039,3 +1075,16 @@ class Smoe:
 
         return remapped_wes
 
+    @staticmethod
+    def find_neighboring_indices(img_shape, batch_shape):
+        segments_per_dim = [1]
+        for k in range(len(img_shape) - 1, 0, -1):
+            segments_per_dim.append(int(img_shape[k - 1] / batch_shape[k]))
+        ind_jump_per_dim = np.cumprod(segments_per_dim)[0:-1]
+        ind_jump_per_dim = np.concatenate((ind_jump_per_dim, -ind_jump_per_dim))
+        indices = [ind_jump_per_dim]
+        for k in range(2, len(img_shape), 1):
+            indices.append(np.sum(np.array(list(combinations(ind_jump_per_dim, k))), axis=1, keepdims=False))
+        indices = np.unique(np.concatenate(indices))
+
+        return indices
