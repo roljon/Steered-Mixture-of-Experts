@@ -676,14 +676,14 @@ class Smoe:
             if update_reconstruction:
                 if train:
                     reconstructions.append(results[5])
-                    w_es.append(results[6])
+                    w_es.append(results[3][results[6]])
                 else:
                     if with_quantized_params:
                         reconstructions.append(results[3])
                         w_es.append(results[4])
                     else:
                         reconstructions.append(results[4])
-                        w_es.append(results[5])
+                        w_es.append(results[3][results[5]])
 
             loss_val += results[0] * np.prod(self.joint_domain_batched.shape[1:-1]) / self.num_pixel
             mse_val += results[1] * np.prod(self.joint_domain_batched.shape[1:-1]) / self.num_pixel
