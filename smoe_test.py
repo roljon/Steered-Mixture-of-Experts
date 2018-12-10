@@ -19,7 +19,7 @@ from utils import save_model, load_params, read_image
 def main(image_path, results_path, iterations, validation_iterations, kernels_per_dim, params_file, l1reg, base_lr,
          batches, checkpoint_path, lr_div, lr_mult, disable_train_pis, disable_train_gammas, disable_train_musx,
          use_diff_center, radial_as, use_determinant, normalize_pis, quantization_mode, bit_depths, quantize_pis, lower_bounds,
-         upper_bounds, use_yuv, only_y_gamma, ssim_opt, sampling_percentage):
+         upper_bounds, use_yuv, only_y_gamma, ssim_opt, sampling_percentage, update_kernel_list_iterations):
 
     if len(bit_depths) != 5:
         raise ValueError("Number of bit depths must be five!")
@@ -140,6 +140,8 @@ if __name__ == '__main__':
                         const=False, default=False,
                         help="SSIM optimization instead of MSE.")
     parser.add_argument('-sp', '--sampling_percentage', type=int, default=100, help="How many samples were used for each update step in percentage")
+    parser.add_argument('-ukl', '--update_kernel_list_iterations', type=int, default=None,
+                        help="number of iterations between kernel list updates")
 
     args = parser.parse_args()
 

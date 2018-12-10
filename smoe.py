@@ -526,8 +526,11 @@ class Smoe:
         init_new_vars_op = tf.variables_initializer(uninitialized_vars)
         self.session.run(init_new_vars_op)
 
-    def train(self, num_iter, val_iter=100, optimizer1=None, optimizer2=None, optimizer3=None, grad_clip_value_abs=None, pis_l1=0,
+    def train(self, num_iter, val_iter=100, ukl_iter=None, optimizer1=None, optimizer2=None, optimizer3=None, grad_clip_value_abs=None, pis_l1=0,
               u_l1=0, sampling_percentage=100, callbacks=()):
+        if ukl_iter == None:
+            ukl_iter = val_iter
+
         if optimizer1:
             self.set_optimizer(optimizer1, optimizer2, optimizer3, grad_clip_value_abs=grad_clip_value_abs)
         assert self.optimizer1 is not None, "no optimizer found, you have to specify one!"
@@ -561,12 +564,15 @@ class Smoe:
             self.iter += 1
             try:
                 validate = i % val_iter == 0
+                update_kernel_list = i % ukl_iter == 0
 
                 loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=True,
                                                              update_reconstruction=False, sampling_percentage=sampling_percentage)
 
-                if validate:
+                if update_kernel_list:
                     self.update_kernel_list()
+
+                if validate:
                     if self.quantization_mode >= 1:
                         self.qparams = quantize_params(self, self.get_params())
                     if self.quantization_mode == 1:
