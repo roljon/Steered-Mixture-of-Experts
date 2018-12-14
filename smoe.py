@@ -17,6 +17,7 @@ class Smoe:
         self.ssim_opt = ssim_opt
         self.use_diff_center = use_diff_center
         self.precision = precision
+        self.train_mask = None
 
         # init params
         self.pis_init = None
@@ -61,6 +62,7 @@ class Smoe:
         self.save_op = None
         self.kernel_list = None
         self.indices = None
+        self.maha_dist = None
         # tf ops - feeding points
         self.musX = None
         self.nu_e = None
@@ -141,6 +143,7 @@ class Smoe:
         self.margin = margin
 
         self.random_sampling_per_batch = [np.ones((np.prod(self.joint_domain_batched.shape[1:self.dim_domain+1]),), dtype=np.float32) / np.prod(self.joint_domain_batched.shape[1:self.dim_domain+1])] * self.start_batches
+        self.get_train_mask()
 
         gpu_options = tf.GPUOptions(allow_growth=True)
         self.session = tf.InteractiveSession(config=tf.ConfigProto(gpu_options=gpu_options))
@@ -148,6 +151,7 @@ class Smoe:
 
         self.init_model(self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init)
         self.initialize_kernel_list()
+
     def init_model(self, nu_e_init, gamma_e_init, pis_init, musX_init, A_init):
 
         self.nu_e_var = tf.Variable(nu_e_init, dtype=tf.float32)
@@ -328,9 +332,15 @@ class Smoe:
         n_w_norm = tf.maximum(10e-12, n_w_norm)
 
         self.w_e_op = n_w / n_w_norm
-        self.w_e_max_op = tf.reshape(tf.argmax(self.w_e_op, axis=0), self.batch_shape[:-1])
 
-        kernel_list_batch_op = tf.reduce_sum(tf.cast(tf.greater(self.w_e_op, 0.5 * 1/(2**self.precision)), tf.int32), axis=1) > 0 # 10 ** -9
+        minimum_influence = 0.5 * 1/(2**self.precision)
+        bool_mask_infl = tf.cast(tf.greater(self.w_e_op, minimum_influence), tf.float32)
+        self.w_e_op = self.w_e_op * bool_mask_infl
+
+        #self.w_e_max_op = tf.reshape(tf.argmax(self.w_e_op, axis=0), self.batch_shape[:-1])
+
+        kernel_list_batch_op = tf.reduce_sum(bool_mask_infl, axis=1) > 0 # 10 ** -9
+        self.w_e_max_op = tf.reshape(tf.argmax(tf.boolean_mask(self.w_e_op, kernel_list_batch_op), axis=0), self.batch_shape[:-1])
         self.indices = tf.boolean_mask(self.indices, kernel_list_batch_op)
 
         nu_e = tf.expand_dims(tf.transpose(nu_e), axis=-1)
@@ -362,14 +372,20 @@ class Smoe:
 
         self.res = tf.fake_quant_with_min_max_args(self.res, min=0, max=1, num_bits=self.precision)
         #mse = tf.reduce_mean(tf.square(tf.round(self.res * 255) / 255 - self.target_op))
-        mse = tf.reduce_mean(tf.square(self.res - self.target_op))
-        err_map = tf.reduce_mean(tf.square(self.res - self.target_op), axis=1)
+
+        if self.dim_domain >= 4:
+            diff = tf.boolean_mask(self.res - self.target_op, self.train_mask)
+        else:
+            diff = self.res - self.target_op
+        squared_diff = tf.square(diff)
+        mse = tf.reduce_mean(squared_diff)
+        err_map = tf.reduce_mean(squared_diff, axis=1)
         self.sampl_prob = err_map / tf.reduce_sum(err_map)
 
         if not self.ssim_opt:
             # margin in pixel to determine epsilon
             epsilon = self.margin * 1 / (2 ** self.precision)
-            loss_pixel = tf.maximum(0., tf.square(tf.subtract(tf.abs(tf.subtract(self.res, self.target_op)), epsilon)))
+            loss_pixel = tf.maximum(0., tf.square(tf.subtract(tf.abs(diff), epsilon)))
             if self.use_yuv:
                 loss_pixel = 6/8 * tf.reduce_mean(loss_pixel[:, 0]) + 1/8 * tf.reduce_sum(tf.reduce_mean(loss_pixel[:, 1::],
                                                                                                          axis=0))
@@ -655,6 +671,10 @@ class Smoe:
                 retrieve.append(self.indices)
 
             img_patch = self.joint_domain_batched[ii].reshape(-1, self.joint_domain_batched[ii].shape[-1])
+
+            if train and self.dim_domain >= 4:
+                img_patch = img_patch[self.train_mask]
+
             if train and not self.ssim_opt and sampling_percentage < 100:
                 num_samples = np.uint32(np.round(img_patch.shape[0] * sampling_percentage/100))
                 samples = np.random.choice(img_patch.shape[0], (num_samples,), replace=False, p=self.random_sampling_per_batch[ii])
@@ -693,10 +713,12 @@ class Smoe:
                 bool_mask[results[3]] = True
                 self.kernel_list_per_batch[ii] = bool_mask
 
+            if update_reconstruction:
+                self.random_sampling_per_batch[ii] = results[-1]
+
         if update_reconstruction:
             reconstruction = np.stack(reconstructions)
             w_e = np.stack(w_es)
-            self.random_sampling_per_batch[ii] = results[-1]
             if not with_quantized_params:
                 self.reconstruction_image = self.uncubify(reconstruction, self.image.shape)
                 self.weight_matrix_argmax = self.uncubify(w_e, self.image.shape[0:self.image.ndim-1])
@@ -855,6 +877,10 @@ class Smoe:
                     a11 = int(round((a1 + stride[0]) * num_disp_1))
                     a20 = int(round((a2 - stride[1]) * num_disp_2))
                     a21 = int(round((a2 + stride[1]) * num_disp_2))
+                    a10 = np.maximum(a10, 4)
+                    a20 = np.maximum(a20, 4)
+                    a11 = np.minimum(a11, 11)
+                    a21 = np.minimum(a21, 11)
 
                     mean[k] = np.mean(self.image[a10:a11, a20:a21, y0:y1, x0:x1], axis=(0, 1, 2, 3))
 
@@ -913,6 +939,24 @@ class Smoe:
             bool_mask = np.zeros((self.start_pis,), dtype=bool)
             bool_mask[results[0]] = True
             self.kernel_list_per_batch[k] = np.logical_or(self.kernel_list_per_batch[k], bool_mask)
+
+    def get_train_mask(self):
+        if self.dim_domain >= 4:
+            train_mask = np.ones(self.batch_shape[:-1], dtype=bool)
+            train_mask[0, 0:4, :, :] = False
+            train_mask[0, 11:, :, :] = False
+            train_mask[1, 0:2, :, :] = False
+            train_mask[1, 13:, :, :] = False
+            train_mask[2:4, 0, :, :] = False
+            train_mask[2:4, 14, :, :] = False
+            train_mask[11:13, 0, :, :] = False
+            train_mask[11:13, 14, :, :] = False
+            train_mask[13, 0:2, :, :] = False
+            train_mask[13, 13:, :, :] = False
+            train_mask[14, 0:4, :, :] = False
+            train_mask[14, 11:, :, :] = False
+            self.train_mask = train_mask.reshape(-1)
+
 
 
     @staticmethod
@@ -1026,6 +1070,10 @@ class Smoe:
                 divisor.append(fac)
             factors.append(divisor)
         factors.append([1])
+        # TODO LF HACK
+        if joint_domain_shape.__len__() > 4:
+            factors[0] = [1]
+            factors[1] = [1]
 
         # get all variations of dimension divisors as tuples
         shapes = list(product(*factors))
