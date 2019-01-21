@@ -314,7 +314,7 @@ class Smoe:
         x_sub_mu = tf.expand_dims(domain_exp - musX, axis=-1)
 
         self.maha_dist = einsum('abli,alm,anm,abnj->ab', x_sub_mu, A, A, x_sub_mu)
-
+        self.maha_dist_ind = tf.boolean_mask(self.indices, tf.reduce_any(self.maha_dist < 400, axis=1))
         n_exp = tf.exp(-0.5 * self.maha_dist)
 
         if self.use_determinant:
@@ -931,11 +931,14 @@ class Smoe:
         maxs = np.max(self.joint_domain_batched, axis=tuple(np.arange(self.dim_domain) + 1))
         mins = mins[:, 0:self.dim_domain]
         maxs = maxs[:, 0:self.dim_domain]
+        # get all corner points of (hyper-)cube and middle points of edges
         tt = np.concatenate((np.expand_dims(mins, axis=-1), np.expand_dims(maxs, axis=-1), np.expand_dims((mins + maxs)/2, axis=-1)), axis=-1)
         for k in range(self.joint_domain_batched.shape[0]):
             edges_batch = np.array(list(product(*tt[k, :, :])))
             edges_batch = np.concatenate((edges_batch, np.zeros((edges_batch.shape[0], self.image.shape[-1]))), axis=1)
-            results = self.session.run([self.indices], feed_dict={self.joint_domain_batched_op: edges_batch, self.kernel_list: np.ones((self.start_pis,), dtype=bool)})
+            results = self.session.run([self.maha_dist_ind], feed_dict={self.joint_domain_batched_op: edges_batch,
+                                                                  self.kernel_list: np.ones((self.start_pis,),
+                                                                                            dtype=bool)})
             bool_mask = np.zeros((self.start_pis,), dtype=bool)
             bool_mask[results[0]] = True
             self.kernel_list_per_batch[k] = np.logical_or(self.kernel_list_per_batch[k], bool_mask)
