@@ -1,5 +1,10 @@
 import numpy as np
 import math
+import cv2
+import os
+from skimage.feature import peak_local_max
+from skimage.measure import compare_ssim
+import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow.python.ops.special_math_ops import _exponential_space_einsum as einsum
 import progressbar
@@ -10,7 +15,7 @@ class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1,
                  train_gammas=True, train_musx=True, use_diff_center=False, radial_as=False, use_determinant=False,
                  normalize_pis=True, quantization_mode=0, bit_depths=None, quantize_pis=False, lower_bounds=None,
-                 upper_bounds=None, use_yuv=True, only_y_gamma=False, ssim_opt=False, precision=8, iter_offset=0, margin=0.5):
+                 upper_bounds=None, use_yuv=True, only_y_gamma=False, ssim_opt=False, precision=8, add_kernel_slots=0, iter_offset=0, margin=0.5):
         self.batch_shape = None
         self.use_yuv = use_yuv
         self.only_y_gamma = only_y_gamma
@@ -18,6 +23,7 @@ class Smoe:
         self.use_diff_center = use_diff_center
         self.precision = precision
         self.train_mask = None
+        self.add_kernel_slots = add_kernel_slots
 
         # init params
         self.pis_init = None
@@ -42,6 +48,32 @@ class Smoe:
         self.gamma_e_best_var = None
         self.nu_e_best_var = None
 
+        # tf inc vars
+        self.pis_inc_var = None
+        self.musX_inc_var = None
+        self.A_diagonal_inc_var = None
+        self.A_corr_inc_var = None
+        self.gamma_e_inc_var = None
+        self.nu_e_inc_var = None
+
+        # tf inc ops
+        self.stack_inc = None
+        self.train_inc_op = None
+        self.zero_inc_op = None
+        self.reset_optimizers_op = None
+        self.accum_inc_ops = None
+        self.optimizer_inc1 = None
+        self.optimizer_inc2 = None
+        self.optimizer_inc3 = None
+        self.insert_pos = None
+        self.assign_inc_vars_op = None
+        self.reinit_inc_vars_op = None
+        self.assign_inc_opt_vars_op = None
+        self.var_inc_opt1 = None
+        self.var_inc_opt2 = None
+        self.var_inc_opt3 = None
+
+
         # tf ops
         self.restoration_op = None
         self.w_e_op = None
@@ -63,6 +95,9 @@ class Smoe:
         self.kernel_list = None
         self.indices = None
         self.maha_dist = None
+        self.var_opt1 = None
+        self.var_opt2 = None
+        self.var_opt3 = None
         # tf ops - feeding points
         self.musX = None
         self.nu_e = None
@@ -140,6 +175,10 @@ class Smoe:
             self.generate_pis(normalize_pis)
 
         self.start_pis = self.pis_init.size
+        # for add_kernel
+        self.kernel_count = self.pis_init.size
+        self.num_inc_kernels = None
+
         self.margin = margin
 
         self.random_sampling_per_batch = [np.ones((np.prod(self.joint_domain_batched.shape[1:self.dim_domain+1]),), dtype=np.float32) / np.prod(self.joint_domain_batched.shape[1:self.dim_domain+1])] * self.start_batches
@@ -149,10 +188,65 @@ class Smoe:
         self.session = tf.InteractiveSession(config=tf.ConfigProto(gpu_options=gpu_options))
         # self.session = tf.Session()
 
-        self.init_model(self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init)
-        self.initialize_kernel_list()
+        self.init_model(self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init, add_kernel_slots)
+        self.initialize_kernel_list(add_kernel_slots)
 
-    def init_model(self, nu_e_init, gamma_e_init, pis_init, musX_init, A_init):
+    def init_model(self, nu_e_init, gamma_e_init, pis_init, musX_init, A_init, add_kernel_slots=0):
+
+        # TODO make radial work again, uncomment for pcs scripts
+        if A_init.ndim == 1:
+            self.radial_as = True
+
+        num_of_all_kernels = self.start_pis
+
+        if add_kernel_slots > 0:
+            num_of_all_kernels = add_kernel_slots + 2 * self.start_pis
+
+            #assert A_init.ndim != 1 and self.radial_as is False, "sorry, no radial kernels with add_kernel feature at the moment"
+            # TODO allow different num_inc_kernels
+            self.num_inc_kernels = pis_init.size
+            self.nu_e_inc_var = tf.Variable(nu_e_init, dtype=tf.float32)
+            self.gamma_e_inc_var = tf.Variable(gamma_e_init, trainable=self.train_gammas, dtype=tf.float32)
+            self.musX_inc_var = tf.Variable(musX_init, dtype=tf.float32)
+
+            if self.radial_as:
+                if A_init.ndim == 1:
+                    self.A_diagonal_inc_var = tf.Variable(A_init, dtype=tf.float32)
+                else:
+                    self.A_diagonal_inc_var = tf.Variable(A_init[:, 0, 0], dtype=tf.float32)
+                self.A_corr_inc_var = tf.Variable(np.zeros_like(A_init), trainable=False, dtype=tf.float32)
+            else:
+                self.A_diagonal_inc_var = tf.Variable(A_init, dtype=tf.float32)
+                self.A_corr_inc_var = tf.Variable(np.zeros_like(A_init), dtype=tf.float32)
+            self.pis_inc_var = tf.Variable(np.zeros_like(pis_init), trainable=self.train_pis, dtype=tf.float32)
+
+            self.nu_e_inc_new = tf.placeholder(tf.float32, nu_e_init.shape)
+            self.gamma_e_inc_new = tf.placeholder(tf.float32, gamma_e_init.shape)
+            self.musX_inc_new = tf.placeholder(tf.float32, musX_init.shape)
+            if self.radial_as and A_init.ndim != 1:
+                self.A_diagonal_inc_new = tf.placeholder(tf.float32, A_init[:, 0, 0].shape)
+            else:
+                self.A_diagonal_inc_new = tf.placeholder(tf.float32, A_init.shape)
+            self.A_corr_inc_new = tf.placeholder(tf.float32, A_init.shape)
+            self.pis_inc_new = tf.placeholder(tf.float32, pis_init.shape)
+
+            nu_e_inc_assign = self.nu_e_inc_var.assign(self.nu_e_inc_new)
+            gamma_e_inc_assign = self.gamma_e_inc_var.assign(self.gamma_e_inc_new)
+            musX_inc_assign = self.musX_inc_var.assign(self.musX_inc_new)
+            A_diagonal_inc_assign = self.A_diagonal_inc_var.assign(self.A_diagonal_inc_new)
+            A_corr_inc_assign = self.A_corr_inc_var.assign(self.A_corr_inc_new)
+            pis_inc_assign = self.pis_inc_var.assign(self.pis_inc_new)
+
+            self.reinit_inc_vars_op = tf.group(nu_e_inc_assign, gamma_e_inc_assign, musX_inc_assign,
+                                               A_diagonal_inc_assign, A_corr_inc_assign, pis_inc_assign)
+
+            nu_e_init = np.vstack((nu_e_init, np.zeros((add_kernel_slots,) + nu_e_init.shape[1:])))
+            gamma_e_init = np.vstack((gamma_e_init, np.zeros((add_kernel_slots,) + gamma_e_init.shape[1:])))
+            musX_init = np.vstack((musX_init, np.zeros((add_kernel_slots,) + musX_init.shape[1:])))
+            pis_init = np.hstack((pis_init, np.zeros((add_kernel_slots,) + pis_init.shape[1:])))
+            A_init = np.vstack((A_init, np.zeros((add_kernel_slots,) + A_init.shape[1:])))
+
+
 
         self.nu_e_var = tf.Variable(nu_e_init, dtype=tf.float32)
         self.gamma_e_var = tf.Variable(gamma_e_init, trainable=self.train_gammas, dtype=tf.float32)
@@ -164,10 +258,10 @@ class Smoe:
         #self.A_var = tf.Variable(A_init, dtype=tf.float32)
         self.pis_var = tf.Variable(pis_init, trainable=self.train_pis, dtype=tf.float32)
 
+        self.stack_inc = tf.constant([1.], dtype=tf.float32)
+        self.stack_orig = tf.constant([1.], dtype=tf.float32)
+        self.insert_pos = tf.placeholder(tf.int32)
 
-        # TODO make radial work again, uncomment for pcs scripts
-        if A_init.ndim == 1:
-            self.radial_as = True
 
         if self.radial_as:
             if A_init.ndim == 1:
@@ -179,72 +273,103 @@ class Smoe:
             self.A_diagonal_var = tf.Variable(A_init, dtype=tf.float32)
             self.A_corr_var = tf.Variable(np.zeros_like(A_init), dtype=tf.float32)
 
+
+        #assert add_kernel_slots > 0, "this is just for testing"
+
+        if add_kernel_slots > 0:
+            nue_e_assign = self.nu_e_var[self.insert_pos:self.insert_pos + self.num_inc_kernels].assign(self.nu_e_inc_var)
+            gamma_e_assign = self.gamma_e_var[self.insert_pos:self.insert_pos + self.num_inc_kernels].assign(
+                self.gamma_e_inc_var)
+            musX_assign = self.musX_var[self.insert_pos:self.insert_pos + self.num_inc_kernels].assign(self.musX_inc_var)
+            A_diagonal_assign = self.A_diagonal_var[self.insert_pos:self.insert_pos + self.num_inc_kernels].assign(self.A_diagonal_inc_var)
+            A_corr_assign = self.A_corr_var[self.insert_pos:self.insert_pos + self.num_inc_kernels].assign(
+                self.A_corr_inc_var)
+            pis_assign = self.pis_var[self.insert_pos:self.insert_pos + self.num_inc_kernels].assign(self.pis_inc_var)
+
+            self.assign_inc_vars_op = tf.group(nue_e_assign, gamma_e_assign, musX_assign, A_diagonal_assign, A_corr_assign, pis_assign)
+
+            # concat and give them name like VAR_concat and then quantize!
+            concat_musX, concat_nu_e, concat_gamma_e, concat_A_diagonal, concat_A_corr, concat_pis = \
+                [tf.concat([self.musX_var, self.musX_inc_var], 0),
+                 tf.concat([self.nu_e_var, self.nu_e_inc_var], 0),
+                 tf.concat([self.gamma_e_var, self.gamma_e_inc_var], 0),
+                 tf.concat([self.A_diagonal_var, self.A_diagonal_inc_var], 0),
+                 tf.concat([self.A_corr_var, self.A_corr_inc_var], 0),
+                 tf.concat([self.pis_var*self.stack_orig, self.pis_inc_var*self.stack_inc], 0)]
+        else:
+            concat_musX = self.musX_var
+            concat_nu_e = self.nu_e_var
+            concat_gamma_e = self.gamma_e_var
+            concat_A_diagonal = self.A_diagonal_var
+            concat_A_corr = self.A_corr_var
+            concat_pis = self.pis_var
+
         # Quantization of parameters (if requested)
         if self.quantization_mode >= 2 or self.quantize_pis:
-            self.qpis = tf.fake_quant_with_min_max_args(self.pis_var, min=self.lower_bounds[3],
+            self.qpis = tf.fake_quant_with_min_max_args(concat_pis, min=self.lower_bounds[3],
                                                         max=self.upper_bounds[3], num_bits=self.bit_depths[3])
         else:
-            self.qpis = self.pis_var
+            self.qpis = concat_pis
 
         pis_mask = self.qpis > 0
 
         if self.quantization_mode == 2:
-            self.qA_diagonal = tf.fake_quant_with_min_max_args(self.A_diagonal_var, min=self.lower_bounds[0],
+            self.qA_diagonal = tf.fake_quant_with_min_max_args(concat_A_diagonal, min=self.lower_bounds[0],
                                                                max=self.upper_bounds[0], num_bits=self.bit_depths[0])
-            self.qA_corr = tf.fake_quant_with_min_max_args(self.A_corr_var, min=self.lower_bounds[0],
+            self.qA_corr = tf.fake_quant_with_min_max_args(concat_A_corr, min=self.lower_bounds[0],
                                                            max=self.upper_bounds[0], num_bits=self.bit_depths[0])
 
-            self.qmusX = tf.fake_quant_with_min_max_args(self.musX_var,
+            self.qmusX = tf.fake_quant_with_min_max_args(concat_musX,
                                                          min=self.lower_bounds[1], max=self.upper_bounds[1],
                                                          num_bits=self.bit_depths[1])
-            self.qnu_e = tf.fake_quant_with_min_max_args(self.nu_e_var,
+            self.qnu_e = tf.fake_quant_with_min_max_args(concat_nu_e,
                                                          min=self.lower_bounds[2], max=self.upper_bounds[2],
                                                          num_bits=self.bit_depths[2])
-            self.qgamma_e = tf.fake_quant_with_min_max_args(self.gamma_e_var,
+            self.qgamma_e = tf.fake_quant_with_min_max_args(concat_gamma_e,
                                                             min=self.lower_bounds[4], max=self.upper_bounds[4],
                                                             num_bits=self.bit_depths[4])
         elif self.quantization_mode == 3:
             if self.radial_as:
-                min_A_diagonal = tf.reduce_min(tf.boolean_mask(self.A_diagonal_var, pis_mask))
-                max_A_diagonal = tf.reduce_max(tf.boolean_mask(self.A_diagonal_var, pis_mask))
-                qA_diagonal = tf.fake_quant_with_min_max_vars(self.A_diagonal_var, min=0,
+                min_A_diagonal = tf.reduce_min(tf.boolean_mask(concat_A_diagonal, pis_mask))
+                max_A_diagonal = tf.reduce_max(tf.boolean_mask(concat_A_diagonal, pis_mask))
+                qA_diagonal = tf.fake_quant_with_min_max_vars(concat_A_diagonal, min=0,
                                                               max=max_A_diagonal - min_A_diagonal,
                                                               num_bits=self.bit_depths[0])
                 self.qA_diagonal = qA_diagonal + min_A_diagonal
             else:
-                min_A_diagonal = tf.reduce_min(tf.matrix_diag_part(tf.boolean_mask(self.A_diagonal_var, pis_mask)))
-                max_A_diagonal = tf.reduce_max(tf.matrix_diag_part(tf.boolean_mask(self.A_diagonal_var, pis_mask)))
-                qA_diagonal = tf.fake_quant_with_min_max_vars(self.A_diagonal_var - min_A_diagonal, min=0,
+                min_A_diagonal = tf.reduce_min(tf.matrix_diag_part(tf.boolean_mask(concat_A_diagonal, pis_mask)))
+                max_A_diagonal = tf.reduce_max(tf.matrix_diag_part(tf.boolean_mask(concat_A_diagonal, pis_mask)))
+                qA_diagonal = tf.fake_quant_with_min_max_vars(concat_A_diagonal - min_A_diagonal, min=0,
                                                               max=max_A_diagonal - min_A_diagonal,
                                                               num_bits=self.bit_depths[0])
                 self.qA_diagonal = qA_diagonal + min_A_diagonal
-            self.qA_corr = tf.fake_quant_with_min_max_vars(self.A_corr_var,
-                                                           min=tf.reduce_min(tf.boolean_mask(self.A_corr_var, pis_mask)),
-                                                           max=tf.reduce_max(tf.boolean_mask(self.A_corr_var, pis_mask)),
+            self.qA_corr = tf.fake_quant_with_min_max_vars(concat_A_corr,
+                                                           min=tf.reduce_min(tf.boolean_mask(concat_A_corr, pis_mask)),
+                                                           max=tf.reduce_max(tf.boolean_mask(concat_A_corr, pis_mask)),
                                                            num_bits=self.bit_depths[0])
             if self.train_musx:
-                self.qmusX = tf.fake_quant_with_min_max_vars(self.musX_var,
-                                                             min=tf.reduce_min(tf.boolean_mask(self.musX_var, pis_mask)),
-                                                             max=tf.reduce_max(tf.boolean_mask(self.musX_var, pis_mask)),
+                self.qmusX = tf.fake_quant_with_min_max_vars(concat_musX,
+                                                             min=tf.reduce_min(tf.boolean_mask(concat_musX, pis_mask)),
+                                                             max=tf.reduce_max(tf.boolean_mask(concat_musX, pis_mask)),
                                                              num_bits=self.bit_depths[1])
             else:
-                self.qmusX = self.musX_var
+                self.qmusX = concat_musX
 
-            min_nu_e = tf.reduce_min(tf.boolean_mask(self.nu_e_var, pis_mask))
-            max_nu_e = tf.reduce_max(tf.boolean_mask(self.nu_e_var, pis_mask))
-            qnu_e = tf.fake_quant_with_min_max_vars(self.nu_e_var - min_nu_e, min=0, max=max_nu_e-min_nu_e, num_bits=self.bit_depths[2])
+            min_nu_e = tf.reduce_min(tf.boolean_mask(concat_nu_e, pis_mask))
+            max_nu_e = tf.reduce_max(tf.boolean_mask(concat_nu_e, pis_mask))
+            qnu_e = tf.fake_quant_with_min_max_vars(concat_nu_e - min_nu_e, min=0, max=max_nu_e-min_nu_e, num_bits=self.bit_depths[2])
             self.qnu_e = qnu_e + min_nu_e
 
-            self.qgamma_e = tf.fake_quant_with_min_max_vars(self.gamma_e_var,
-                                                            min=tf.reduce_min(tf.boolean_mask(self.gamma_e_var, pis_mask)),
-                                                            max=tf.reduce_max(tf.boolean_mask(self.gamma_e_var, pis_mask)),
+            self.qgamma_e = tf.fake_quant_with_min_max_vars(concat_gamma_e,
+                                                            min=tf.reduce_min(tf.boolean_mask(concat_gamma_e, pis_mask)),
+                                                            max=tf.reduce_max(tf.boolean_mask(concat_gamma_e, pis_mask)),
                                                             num_bits=self.bit_depths[4])
         else:
-            self.qA_diagonal = self.A_diagonal_var
-            self.qA_corr = self.A_corr_var
-            self.qmusX = self.musX_var
-            self.qnu_e = self.nu_e_var
-            self.qgamma_e = self.gamma_e_var
+            self.qA_diagonal = concat_A_diagonal
+            self.qA_corr = concat_A_corr
+            self.qmusX = concat_musX
+            self.qnu_e = concat_nu_e
+            self.qgamma_e = concat_gamma_e
 
 
 
@@ -262,11 +387,11 @@ class Smoe:
 
 
         if self.radial_as:
-           A_mask = np.zeros((self.dim_domain, self.dim_domain))
-           np.fill_diagonal(A_mask, 1)
-           A_mask = np.tile(A_mask, (A_init.shape[0], 1, 1))
+           #A_mask = np.zeros((self.dim_domain, self.dim_domain))
+           #np.fill_diagonal(A_mask, 1)
+           #A_mask = np.tile(A_mask, (A_init.shape[0]*self.add_kernel_slots, 1, 1))
            A = tf.tile(tf.expand_dims(tf.expand_dims(self.qA_diagonal, axis=-1), axis=-1), (1, self.dim_domain, self.dim_domain))
-           A_diagonal = A * A_mask
+           A_diagonal = A  # * A_mask
         else:
            A_diagonal = self.qA_diagonal
         A_corr = self.qA_corr
@@ -280,12 +405,12 @@ class Smoe:
 
         # combine A_diagonal and A_corr and use only triangular part
         A = tf.matrix_band_part(A_diagonal, 0, 0) \
-            + tf.matrix_band_part(tf.matrix_set_diag(A_corr, np.zeros((self.start_pis, self.dim_domain))), -1, 0)
+            + tf.matrix_band_part(tf.matrix_set_diag(A_corr, np.zeros((num_of_all_kernels, self.dim_domain))), -1, 0)
 
         bool_mask = tf.logical_and(self.kernel_list, pis_mask)
 
         # track indices of used and necessary kernels
-        self.indices = tf.constant(np.arange(self.start_pis), dtype=tf.int32)
+        self.indices = tf.constant(np.arange(num_of_all_kernels), dtype=tf.int32)
         self.indices = tf.boolean_mask(self.indices, bool_mask)
 
 
@@ -314,7 +439,7 @@ class Smoe:
         x_sub_mu = tf.expand_dims(domain_exp - musX, axis=-1)
 
         self.maha_dist = einsum('abli,alm,anm,abnj->ab', x_sub_mu, A, A, x_sub_mu)
-        self.maha_dist_ind = tf.boolean_mask(self.indices, tf.reduce_any(self.maha_dist < 400, axis=1))
+        self.maha_dist_ind = tf.boolean_mask(self.indices, tf.reduce_any(self.maha_dist < 800, axis=1))
         n_exp = tf.exp(-0.5 * self.maha_dist)
 
         if self.use_determinant:
@@ -357,12 +482,12 @@ class Smoe:
         self.res = tf.transpose(self.res)
 
         # checkpoint op
-        self.pis_best_var = tf.Variable(self.pis_var)
-        self.musX_best_var = tf.Variable(self.musX_var)
-        self.A_diagonal_best_var = tf.Variable(self.A_diagonal_var)
-        self.A_corr_best_var = tf.Variable(self.A_corr_var)
-        self.gamma_e_best_var = tf.Variable(self.gamma_e_var)
-        self.nu_e_best_var = tf.Variable(self.nu_e_var)
+        self.pis_best_var = tf.Variable(self.qpis)
+        self.musX_best_var = tf.Variable(self.qmusX)
+        self.A_diagonal_best_var = tf.Variable(self.qA_diagonal)
+        self.A_corr_best_var = tf.Variable(self.qA_corr)
+        self.gamma_e_best_var = tf.Variable(self.qgamma_e)
+        self.nu_e_best_var = tf.Variable(self.qnu_e)
         self.checkpoint_best_op = tf.group(tf.assign(self.pis_best_var, self.qpis),
                                            tf.assign(self.musX_best_var, self.qmusX),
                                            tf.assign(self.A_diagonal_best_var, self.qA_diagonal),
@@ -506,29 +631,29 @@ class Smoe:
         var_opt3 = [self.A_diagonal_var, self.A_corr_var]
 
         # sort out not trainable vars
-        var_opt1 = [var for var in var_opt1 if var in tf.trainable_variables()]
-        var_opt2 = [var for var in var_opt2 if var in tf.trainable_variables()]
-        var_opt3 = [var for var in var_opt3 if var in tf.trainable_variables()]
+        self.var_opt1 = [var for var in var_opt1 if var in tf.trainable_variables()]
+        self.var_opt2 = [var for var in var_opt2 if var in tf.trainable_variables()]
+        self.var_opt3 = [var for var in var_opt3 if var in tf.trainable_variables()]
 
         accum_gradients = [tf.Variable(tf.zeros_like(var.initialized_value()), trainable=False)
-                           for var in var_opt1 + var_opt2 + var_opt3]
+                           for var in self.var_opt1 + self.var_opt2 + self.var_opt3]
         self.zero_op = [grad.assign(tf.zeros_like(grad)) for grad in accum_gradients]
-        gradients = tf.gradients(self.loss_op, var_opt1 + var_opt2 + var_opt3)
+        gradients = tf.gradients(self.loss_op, self.var_opt1 + self.var_opt2 + self.var_opt3)
         self.accum_ops = [accum_gradients[i].assign_add(gv) for i, gv in enumerate(gradients)]
 
         if grad_clip_value_abs is not None:
             accum_gradients = [tf.clip_by_value(g, -grad_clip_value_abs, grad_clip_value_abs) for g in accum_gradients]
 
-        gradients1 = accum_gradients[:len(var_opt1)]
-        gradients2 = accum_gradients[len(var_opt1):len(var_opt1) + len(var_opt2)]
-        gradients3 = accum_gradients[len(var_opt1) + len(var_opt2):]
+        gradients1 = accum_gradients[:len(self.var_opt1)]
+        gradients2 = accum_gradients[len(self.var_opt1):len(self.var_opt1) + len(self.var_opt2)]
+        gradients3 = accum_gradients[len(self.var_opt1) + len(self.var_opt2):]
 
-        train_op1 = self.optimizer1.apply_gradients(zip(gradients1, var_opt1))
+        train_op1 = self.optimizer1.apply_gradients(zip(gradients1, self.var_opt1))
         if len(var_opt2) > 0:
-            train_op2 = self.optimizer2.apply_gradients(zip(gradients2, var_opt2))
+            train_op2 = self.optimizer2.apply_gradients(zip(gradients2, self.var_opt2))
         else:
             train_op2 = tf.no_op()
-        train_op3 = self.optimizer3.apply_gradients(zip(gradients3, var_opt3))
+        train_op3 = self.optimizer3.apply_gradients(zip(gradients3, self.var_opt3))
         self.train_op = tf.group(train_op1, train_op2, train_op3)
 
         uninitialized_vars = []
@@ -542,8 +667,213 @@ class Smoe:
         init_new_vars_op = tf.variables_initializer(uninitialized_vars)
         self.session.run(init_new_vars_op)
 
+    def set_inc_optimizer(self, optimizer1, optimizer2=None, optimizer3=None, grad_clip_value_abs=None):
+        assert optimizer2 is not None and optimizer3 is not None, "this may break if one optimizer is reused"
+        self.optimizer_inc1 = optimizer1
+
+        if optimizer2 is None:
+            self.optimizer_inc2 = optimizer1
+        else:
+            self.optimizer_inc2 = optimizer2
+
+        if optimizer3 is None:
+            self.optimizer_inc3 = optimizer1
+        else:
+            self.optimizer_inc3 = optimizer3
+
+        var_inc_opt1 = [self.nu_e_inc_var, self.gamma_e_inc_var, self.musX_inc_var]
+        var_inc_opt2 = [self.pis_inc_var]
+        var_inc_opt3 = [self.A_diagonal_inc_var, self.A_corr_inc_var]
+
+        # sort out not trainable vars
+        self.var_inc_opt1 = [var for var in var_inc_opt1 if var in tf.trainable_variables()]
+        self.var_inc_opt2 = [var for var in var_inc_opt2 if var in tf.trainable_variables()]
+        self.var_inc_opt3 = [var for var in var_inc_opt3 if var in tf.trainable_variables()]
+
+        accum_gradients = [tf.Variable(tf.zeros_like(var.initialized_value()), trainable=False)
+                           for var in self.var_inc_opt1 + self.var_inc_opt2 + self.var_inc_opt3]
+        self.accum_inc_gradients = accum_gradients
+        self.zero_inc_op = [grad.assign(tf.zeros_like(grad)) for grad in accum_gradients]
+        gradients = tf.gradients(self.loss_op, self.var_inc_opt1 + self.var_inc_opt2 + self.var_inc_opt3)
+        self.accum_inc_ops = [accum_gradients[i].assign_add(gv) for i, gv in enumerate(gradients)]
+        if grad_clip_value_abs is not None:
+            accum_gradients = [tf.clip_by_value(g, -grad_clip_value_abs, grad_clip_value_abs) for g in accum_gradients]
+
+        gradients1 = accum_gradients[:len(self.var_inc_opt1)]
+        gradients2 = accum_gradients[len(self.var_inc_opt1):len(self.var_inc_opt1) + len(self.var_inc_opt2)]
+        gradients3 = accum_gradients[len(self.var_inc_opt1) + len(self.var_inc_opt2):]
+
+        if len(self.var_inc_opt1) > 0:
+            train_op1 = self.optimizer_inc1.apply_gradients(zip(gradients1, self.var_inc_opt1))
+        else:
+            train_op1 = tf.no_op()
+        if len(self.var_inc_opt2) > 0:
+            train_op2 = self.optimizer_inc2.apply_gradients(zip(gradients2, self.var_inc_opt2))
+        else:
+            train_op2 = tf.no_op()
+        if len(self.var_inc_opt3) > 0:
+            train_op3 = self.optimizer_inc3.apply_gradients(zip(gradients3, self.var_inc_opt3))
+        else:
+            train_op3 = tf.no_op()
+
+        self.train_inc_op = tf.group(train_op1, train_op2, train_op3)
+
+        uninitialized_vars = []
+        for var in tf.global_variables():
+            try:
+                self.session.run(var)
+            except tf.errors.FailedPreconditionError:
+                if var is not None:
+                    uninitialized_vars.append(var)
+
+        init_new_vars_op = tf.variables_initializer(uninitialized_vars)
+        self.session.run(init_new_vars_op)
+
+        # self.reset_optimizers_op = tf.group([tf.variables_initializer(self.optimizer_inc1.variables()),
+        #                                      tf.variables_initializer(self.optimizer_inc2.variables()),
+        #                                      tf.variables_initializer(self.optimizer_inc3.variables())])
+        #TODO use the above (i.e. upgrade tf)
+        reset_vars = []
+        for name in self.optimizer_inc1.get_slot_names():
+            for var_inc in self.var_inc_opt1:
+                reset_vars.append(self.optimizer_inc1.get_slot(var_inc, name))
+        for name in self.optimizer_inc2.get_slot_names():
+            for var_inc in self.var_inc_opt2:
+                reset_vars.append(self.optimizer_inc2.get_slot(var_inc, name))
+        for name in self.optimizer_inc3.get_slot_names():
+            for var_inc in self.var_inc_opt3:
+                reset_vars.append(self.optimizer_inc3.get_slot(var_inc, name))
+
+        self.reset_optimizers_op = tf.variables_initializer(reset_vars)
+
+        # apply optimizer vars
+        assert self.optimizer1 is not None, "call set_optimizer before set_inc_optimizer"
+
+        opt_inc_assign_ops = []
+        for name in self.optimizer1.get_slot_names():
+            for var, var_inc in zip(self.var_opt1, self.var_inc_opt1):
+                slot = self.optimizer1.get_slot(var, name)
+                slot_inc = self.optimizer_inc1.get_slot(var_inc, name)
+                assign_op = slot[self.insert_pos:self.insert_pos + self.num_inc_kernels].assign(slot_inc)
+                opt_inc_assign_ops.append(assign_op)
+
+        for name in self.optimizer2.get_slot_names():
+            for var, var_inc in zip(self.var_opt2, self.var_inc_opt2):
+                slot = self.optimizer2.get_slot(var, name)
+                slot_inc = self.optimizer_inc2.get_slot(var_inc, name)
+                assign_op = slot[self.insert_pos:self.insert_pos + self.num_inc_kernels].assign(slot_inc)
+                opt_inc_assign_ops.append(assign_op)
+
+        for name in self.optimizer3.get_slot_names():
+            for var, var_inc in zip(self.var_opt3, self.var_inc_opt3):
+                slot = self.optimizer3.get_slot(var, name)
+                slot_inc = self.optimizer_inc3.get_slot(var_inc, name)
+                assign_op = slot[self.insert_pos:self.insert_pos + self.num_inc_kernels].assign(slot_inc)
+                opt_inc_assign_ops.append(assign_op)
+
+        self.assign_inc_opt_vars_op = tf.group(*opt_inc_assign_ops)
+
+    def calc_peaks_inc(self, threshold_rel, max_iters=100, plot_dir=None):
+        rec = self.get_reconstruction()
+        sigma = 1
+        # diff = np.abs(self.image - rec)
+        if self.ssim_opt:
+            diff = 1 - compare_ssim(self.image[:, :, 0], rec[:, :, 0], data_range=1, multichannel=True, full=True)[1]
+        else:
+            diff = np.power(255 * (self.image[:, :, 0] - rec[:, :, 0]), 2)
+
+        reverse = None
+        for i in range(1, max_iters):
+            if reverse:
+                i = 1 / (self.num_inc_kernels - i + 1)
+
+            blurred = cv2.GaussianBlur(diff, (0, 0), i, i)
+            blurred_mean = np.mean(blurred)
+            peaks = peak_local_max(blurred, threshold_abs=blurred_mean, threshold_rel=threshold_rel)
+
+            if reverse is None:
+                if peaks.shape[0] < self.num_inc_kernels:
+                    reverse = True
+                    continue
+                else:
+                    reverse = False
+
+            # print("[{0}] blurred_mean: {1:.2f} num_peaks: {2} sigma: {3:.3f}".format(self.iter, blurred_mean, peaks.shape[0], i))
+            if peaks.shape[0] < self.num_inc_kernels:
+                break
+            sigma = i
+
+        blurred = cv2.GaussianBlur(diff, (0, 0), sigma, sigma)
+        peaks = peak_local_max(blurred, num_peaks=self.num_inc_kernels)
+        blurred_mean = np.mean(blurred)
+        blurred_median = np.median(blurred)
+
+        a = 1 / (sigma / self.image.shape[0]) * 2/1
+
+        if plot_dir:
+            if not os.path.exists(plot_dir):
+                os.mkdir(plot_dir)
+
+            fig = plt.figure()
+            plt.imshow(blurred, cmap='gray')
+            plt.colorbar()
+            plt.title(
+                "num peaks: {0:.2f}, sigma: {1:.2f} (a^2: {2:.2f}) bmen: {3:.2f} bmed: {4:.2f}".format(peaks.shape[0],
+                                                                                                       sigma, a,
+                                                                                                       blurred_mean,
+                                                                                                       blurred_median))
+            plt.scatter(peaks[:, 1], peaks[:, 0])
+            plt.savefig("{}/inc_{}.png".format(plot_dir, self.iter))
+            plt.close(fig)
+
+        return peaks, a
+
+    def reinit_inc(self, plot_dir=None, threshold_rel=0.2):
+        # rec = self.get_reconstruction()
+        # blurred = cv2.GaussianBlur(np.abs(self.image - rec), (0, 0), 5, 5)
+        # peaks = peak_local_max(blurred, num_peaks=self.num_inc_kernels)
+        peaks, a = self.calc_peaks_inc(threshold_rel=threshold_rel, plot_dir=plot_dir)
+        musX_inc = peaks / self.image.shape[0:-1]
+        pis_inc = self.pis_init
+        gamma_e_inc = np.zeros_like(self.gamma_e_init)
+        nu_e_inc = np.ones_like(self.nu_e_init) * 0.5
+
+        A_diagonal_inc = np.zeros_like(self.A_init)
+        A_corr_inc = np.zeros_like(self.A_init)
+        # a = 2 * (self.kernel_count + 1)
+        A_diagonal_inc[:, 0, 0] = a
+        A_diagonal_inc[:, 1, 1] = a
+        if self.radial_as:
+            A_diagonal_inc = A_diagonal_inc[:, 0, 0]
+
+        # fig = plt.figure()
+        # plt.imshow(blurred, vmin=-1, vmax=1, cmap='gray')
+        # plt.scatter(peaks[:, 1], peaks[:, 0])
+        # plt.savefig("inc_{}.png".format(self.iter))
+        # plt.close(fig)
+
+        self.session.run(self.reinit_inc_vars_op, feed_dict={self.nu_e_inc_new: nu_e_inc, self.musX_inc_new: musX_inc,
+                                                             self.pis_inc_new: pis_inc,
+                                                             self.gamma_e_inc_new: gamma_e_inc,
+                                                             self.A_diagonal_inc_new: A_diagonal_inc,
+                                                             self.A_corr_inc_new: A_corr_inc})
+
+        #self.update_kernel_list(self.add_kernel_slots)
+
+        proto = np.zeros((self.add_kernel_slots + 2 * self.start_pis,), dtype=bool)
+        proto[self.add_kernel_slots + self.start_pis::] = True
+        for k in range(self.start_batches):
+            self.kernel_list_per_batch[k] = np.logical_or(self.kernel_list_per_batch[k], proto)
+        #self.kernel_list_per_batch = [np.ones((self.add_kernel_slots + 2*self.start_pis,), dtype=bool)] * self.start_batches
+
+    def apply_inc(self):
+        self.session.run([self.assign_inc_opt_vars_op], feed_dict={self.insert_pos: self.kernel_count})
+        self.session.run([self.assign_inc_vars_op], feed_dict={self.insert_pos: self.kernel_count})
+        self.session.run(self.reset_optimizers_op)
+        self.kernel_count += self.num_inc_kernels
+
     def train(self, num_iter, val_iter=100, ukl_iter=None, optimizer1=None, optimizer2=None, optimizer3=None, grad_clip_value_abs=None, pis_l1=0,
-              u_l1=0, sampling_percentage=100, callbacks=()):
+              u_l1=0, sampling_percentage=100, callbacks=(), with_inc=False, train_inc=False, train_orig=True):
         if ukl_iter == None:
             ukl_iter = val_iter
 
@@ -560,17 +890,17 @@ class Smoe:
         if self.quantization_mode == 1:
             self.rparams = rescaler(self, self.qparams)
             self.best_qloss, self.best_qmse, _ = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=False, update_reconstruction=True,
-                                       with_quantized_params=True)
+                                       with_quantized_params=True, with_inc=with_inc, train_inc=False)
             self.qlosses.append((0, self.best_qloss))
             self.qmses.append((0, self.best_qmse))
 
         self.best_loss, self.best_mse, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=False,
-                                                                 update_reconstruction=True)
+                                                                 update_reconstruction=True, with_inc=with_inc, train_inc=False)
 
 
-        self.losses.append((0, self.best_loss))
-        self.mses.append((0, self.best_mse))
-        self.num_pis.append((0, num_pi))
+        self.losses.append((self.iter, self.best_loss))
+        self.mses.append((self.iter, self.best_mse))
+        self.num_pis.append((self.iter, num_pi))
 
         # run callbacks
         for callback in callbacks:
@@ -582,11 +912,12 @@ class Smoe:
                 validate = i % val_iter == 0
                 update_kernel_list = i % ukl_iter == 0
 
-                loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=True,
-                                                             update_reconstruction=False, sampling_percentage=sampling_percentage)
+                loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=train_orig,
+                                                             update_reconstruction=False, sampling_percentage=sampling_percentage,
+                                                             with_inc=with_inc, train_inc=train_inc)
 
                 if update_kernel_list:
-                    self.update_kernel_list()
+                    self.update_kernel_list(self.add_kernel_slots)
 
                 if validate:
                     if self.quantization_mode >= 1:
@@ -595,9 +926,9 @@ class Smoe:
                         self.rparams = rescaler(self, self.qparams)
                         qloss_val, qmse_val, _ = self.run_batched(pis_l1=pis_l1,
                                                                   u_l1=u_l1, train=False, update_reconstruction=True,
-                                                                  with_quantized_params=True)
+                                                                  with_quantized_params=True, with_inc=with_inc, train_inc=False)
                     loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=False,
-                                                                 update_reconstruction=True)
+                                                                 update_reconstruction=True, with_inc=with_inc, train_inc=False)
                     # run batched with quant params
 
                 # TODO take loss_history into account
@@ -614,18 +945,18 @@ class Smoe:
                         self.best_loss = loss_val
                         self.session.run(self.checkpoint_best_op)
                         # break
-                    self.losses.append((i, loss_val))
+                    self.losses.append((self.iter, loss_val))
 
                     # TODO take mses_history into account
                     if not self.best_mse or mse_val < self.best_mse:
                         self.best_mse = mse_val
-                    self.mses.append((i, mse_val))
+                    self.mses.append((self.iter, mse_val))
 
                     if self.quantization_mode == 1:
                         self.qmses.append((i, qmse_val))
                         self.qlosses.append((i, qloss_val))
 
-                    self.num_pis.append((i, num_pi))
+                    self.num_pis.append((self.iter, num_pi))
 
                     # run callbacks
                     for callback in callbacks:
@@ -640,13 +971,18 @@ class Smoe:
         print("end loss/mse: ", loss_val, "/", mse_val, "@iter: ", i)
         print("best loss/mse: ", self.best_loss, "/", self.best_mse)
 
-    def run_batched(self, pis_l1=0, u_l1=0, train=True, update_reconstruction=False, with_quantized_params=False, sampling_percentage=100):
+    def run_batched(self, pis_l1=0, u_l1=0, train=True, update_reconstruction=False, with_quantized_params=False, sampling_percentage=100, with_inc=False, train_inc=False):
         self.valid = False
         if with_quantized_params:
             self.qvalid = False
 
         if train:
             self.session.run(self.zero_op)
+
+        if train_inc:
+            assert with_inc, "need inc to train inc"
+            self.session.run(self.zero_inc_op)
+
 
         loss_val = 0
         mse_val = 0
@@ -682,13 +1018,17 @@ class Smoe:
                 samples = np.arange(img_patch.shape[0])
 
             feed_dict = {self.joint_domain_batched_op: img_patch[samples, :], self.pis_l1: pis_l1, self.u_l1: u_l1,
-                         self.kernel_list: self.kernel_list_per_batch[ii]}
+                         self.kernel_list: self.kernel_list_per_batch[ii], self.stack_inc: [1.] if with_inc else [0.],
+                         self.stack_orig: [1.]}
             if train:
                 retrieve.append(self.accum_ops)
             if update_reconstruction:
                 retrieve += [self.res, self.w_e_max_op]
                 if with_quantized_params:
                     feed_dict.update({self.A: self.rparams["A"], self.musX: self.rparams["musX"], self.nu_e: self.rparams["nu_e"], self.gamma_e: self.rparams["gamma_e"], self.pis: self.rparams["pis"]})
+
+            if train_inc:
+                retrieve.append(self.accum_inc_ops)
 
             retrieve.append(self.sampl_prob)
 
@@ -709,7 +1049,7 @@ class Smoe:
             mse_val += results[1] * np.prod(self.joint_domain_batched.shape[1:-1]) / self.num_pixel
             num_pi = results[2]
             if not with_quantized_params:
-                bool_mask = np.zeros((self.start_pis,), dtype=bool)
+                bool_mask = np.zeros_like(self.kernel_list_per_batch[ii])
                 bool_mask[results[3]] = True
                 self.kernel_list_per_batch[ii] = bool_mask
 
@@ -730,6 +1070,9 @@ class Smoe:
 
         if train:
             self.session.run(self.train_op)
+        if train_inc:
+            self.session.run(self.train_inc_op)
+
 
         return loss_val, mse_val, num_pi
 
@@ -909,24 +1252,39 @@ class Smoe:
         else:
             self.pis_init = np.ones((number,), dtype=np.float32)
 
-    def initialize_kernel_list(self):
+    def initialize_kernel_list(self, add_kernel_slots=0):
+        num_of_all_kernels = self.start_pis
+        if add_kernel_slots > 0:
+            num_of_all_kernels = 2*num_of_all_kernels + add_kernel_slots
+
         batch_center = np.mean(self.joint_domain_batched, axis=tuple(np.arange(self.dim_domain) + 1))
 
         maha_dists = []
         for k in range(self.joint_domain_batched.shape[0]):
             results = self.session.run([self.maha_dist], feed_dict={self.joint_domain_batched_op:  np.expand_dims(batch_center[k], axis=0),
-                                                                 self.kernel_list: np.ones((self.start_pis,),
-                                                                                           dtype=bool)})
+                                                                 self.kernel_list: np.ones((num_of_all_kernels,),
+                                                                                           dtype=bool),
+                                                                    self.stack_inc: [0.],
+                                                                    self.stack_orig: [1.]})
             maha_dists.append(results[0])
         maha_dists = np.concatenate(maha_dists, axis=1)
         maha_dist_min_ind = np.argmin(maha_dists, axis=1)
         self.kernel_list_per_batch = []
         for k in range(self.joint_domain_batched.shape[0]):
-            self.kernel_list_per_batch.append(maha_dist_min_ind == k)
+            if add_kernel_slots > 0:
+                self.kernel_list_per_batch.append(np.concatenate(
+                    [maha_dist_min_ind == k, np.zeros((add_kernel_slots + self.start_pis,), dtype=bool)]))
+            else:
+                self.kernel_list_per_batch.append(maha_dist_min_ind == k)
 
-        self.update_kernel_list()
 
-    def update_kernel_list(self):
+        self.update_kernel_list(add_kernel_slots)
+
+    def update_kernel_list(self, add_kernel_slots=0):
+        num_of_all_kernels = self.start_pis
+        if add_kernel_slots > 0:
+            num_of_all_kernels = 2*num_of_all_kernels + add_kernel_slots
+
         mins = np.min(self.joint_domain_batched, axis=tuple(np.arange(self.dim_domain) + 1))
         maxs = np.max(self.joint_domain_batched, axis=tuple(np.arange(self.dim_domain) + 1))
         mins = mins[:, 0:self.dim_domain]
@@ -937,9 +1295,12 @@ class Smoe:
             edges_batch = np.array(list(product(*tt[k, :, :])))
             edges_batch = np.concatenate((edges_batch, np.zeros((edges_batch.shape[0], self.image.shape[-1]))), axis=1)
             results = self.session.run([self.maha_dist_ind], feed_dict={self.joint_domain_batched_op: edges_batch,
-                                                                  self.kernel_list: np.ones((self.start_pis,),
-                                                                                            dtype=bool)})
-            bool_mask = np.zeros((self.start_pis,), dtype=bool)
+                                                                  self.kernel_list: np.ones((num_of_all_kernels,),
+                                                                                            dtype=bool),
+                                                                    self.stack_inc: [1.],
+                                                                    self.stack_orig: [1.]})
+            #bool_mask = np.zeros((self.start_pis,), dtype=bool)
+            bool_mask = np.zeros((num_of_all_kernels,), dtype=bool)
             bool_mask[results[0]] = True
             self.kernel_list_per_batch[k] = np.logical_or(self.kernel_list_per_batch[k], bool_mask)
 

@@ -16,7 +16,7 @@ from logger import ModelLogger
 from utils import save_model, load_params, read_image
 
 
-def main(image_path, results_path, iterations, validation_iterations, kernels_per_dim, params_file, l1reg, base_lr,
+def main(image_path, results_path, iterations, iterations_inc, inc_steps, threshold_rel, validation_iterations, kernels_per_dim, params_file, l1reg, base_lr,
          batches, checkpoint_path, lr_div, lr_mult, disable_train_pis, disable_train_gammas, disable_train_musx,
          use_diff_center, radial_as, use_determinant, normalize_pis, quantization_mode, bit_depths, quantize_pis, lower_bounds,
          upper_bounds, use_yuv, only_y_gamma, ssim_opt, sampling_percentage, update_kernel_list_iterations):
@@ -58,7 +58,7 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
                 train_gammas=not disable_train_gammas, train_musx=not disable_train_musx, use_diff_center=use_diff_center, radial_as=radial_as, start_batches=batches,
                 use_determinant=use_determinant, normalize_pis=normalize_pis, quantization_mode=quantization_mode,
                 bit_depths=bit_depths, quantize_pis=quantize_pis, lower_bounds=lower_bounds, upper_bounds=upper_bounds,
-                use_yuv=use_yuv, only_y_gamma=only_y_gamma, ssim_opt=ssim_opt, precision=precision)
+                use_yuv=use_yuv, only_y_gamma=only_y_gamma, ssim_opt=ssim_opt, precision=precision, add_kernel_slots=inc_steps*np.prod(kernels_per_dim))
 
 
 
@@ -69,14 +69,32 @@ def main(image_path, results_path, iterations, validation_iterations, kernels_pe
     # optimizers have to be set before the restore
     smoe.set_optimizer(optimizer1, optimizer2, optimizer3)
 
+    base_lr_inc = base_lr  # *10
+    optimizer_inc1 = tf.train.AdamOptimizer(base_lr_inc)
+    optimizer_inc2 = tf.train.AdamOptimizer(base_lr_inc / 100)
+    optimizer_inc3 = tf.train.AdamOptimizer(base_lr_inc * 1000)
+    smoe.set_inc_optimizer(optimizer_inc1, optimizer_inc2, optimizer_inc3)
+
+
     if checkpoint_path is not None:
         smoe.restore(checkpoint_path)
 
     smoe.train(iterations, val_iter=validation_iterations, pis_l1=l1reg, sampling_percentage=sampling_percentage,
                callbacks=[loss_plotter.plot, image_plotter.plot, logger.log])
 
-    save_model(smoe, results_path + "/params_best.pkl", best=True)
-    save_model(smoe, results_path + "/params_last.pkl", best=False)
+    for i in range(inc_steps):
+        print("[{}/{}]".format(i, inc_steps))
+        smoe.reinit_inc(threshold_rel=threshold_rel, plot_dir=results_path)
+        smoe.train(iterations_inc, val_iter=validation_iterations, pis_l1=l1reg,
+                   with_inc=True, train_inc=True, train_orig=False,
+                   callbacks=[loss_plotter.plot, image_plotter.plot, logger.log])
+        smoe.apply_inc()
+        smoe.train(iterations, val_iter=validation_iterations, pis_l1=l1reg,
+                   callbacks=[loss_plotter.plot, image_plotter.plot, logger.log])
+
+
+    save_model(smoe, results_path + "/params_best.pkl", best=True, quantize=False if quantization_mode == 0 else True)
+    save_model(smoe, results_path + "/params_last.pkl", best=False, quantize=False if quantization_mode == 0 else True)
 
 def str2bool(v):
     if v.lower() in ('yes', 'true', 't', 'y', '1'):
@@ -92,6 +110,10 @@ if __name__ == '__main__':
     parser.add_argument('-i', '--image_path', type=str, required=True, help="input image")
     parser.add_argument('-r', '--results_path', type=str, required=True, help="results path")
     parser.add_argument('-n', '--iterations', type=int, default=10000, help="number of iterations")
+    parser.add_argument('-ni', '--iterations_inc', type=int, default=1000, help="number of inc training iterations")
+    parser.add_argument('-is', '--inc_steps', type=int, default=100, help="number of inc training iterations")
+    parser.add_argument('-tr', '--threshold_rel', type=float, default=0.2, help="relative threshold for peak calculation")
+
     parser.add_argument('-v', '--validation_iterations', type=int, default=100, help="number of iterations between validations")
     parser.add_argument('-k', '--kernels_per_dim', type=int, default=[12], nargs='+', help="number of kernels per dimension")
     parser.add_argument('-p', '--params_file', type=str, default=None, help="parameter file for model initialization")
