@@ -10,6 +10,7 @@ from tensorflow.python.ops.special_math_ops import _exponential_space_einsum as 
 import progressbar
 from itertools import product, combinations
 from quantizer import quantize_params, rescaler
+from scipy.ndimage import gaussian_filter
 
 class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1,
@@ -777,17 +778,22 @@ class Smoe:
         rec = self.get_reconstruction()
         sigma = 1
         # diff = np.abs(self.image - rec)
-        if self.ssim_opt:
-            diff = 1 - compare_ssim(self.image[:, :, 0], rec[:, :, 0], data_range=1, multichannel=True, full=True)[1]
+        if self.use_yuv:
+            weights = [6/8, 1/8, 1/8]
         else:
-            diff = np.power(255 * (self.image[:, :, 0] - rec[:, :, 0]), 2)
+            weights = [1, 1, 1]
+
+        if self.ssim_opt:
+            diff = np.average(1 - compare_ssim(self.image, rec, data_range=1, multichannel=True, full=True)[1], axis=-1, weights=weights)
+        else:
+            diff = np.average(np.power(255 * (self.image - rec), 2), axis=-1, weights=weights)
 
         reverse = None
         for i in range(1, max_iters):
             if reverse:
                 i = 1 / (self.num_inc_kernels - i + 1)
 
-            blurred = cv2.GaussianBlur(diff, (0, 0), i, i)
+            blurred = gaussian_filter(diff, i)
             blurred_mean = np.mean(blurred)
             peaks = peak_local_max(blurred, threshold_abs=blurred_mean, threshold_rel=threshold_rel)
 
@@ -803,7 +809,7 @@ class Smoe:
                 break
             sigma = i
 
-        blurred = cv2.GaussianBlur(diff, (0, 0), sigma, sigma)
+        blurred = gaussian_filter(diff, sigma)
         peaks = peak_local_max(blurred, num_peaks=self.num_inc_kernels)
         blurred_mean = np.mean(blurred)
         blurred_median = np.median(blurred)
@@ -815,7 +821,13 @@ class Smoe:
                 os.mkdir(plot_dir)
 
             fig = plt.figure()
-            plt.imshow(blurred, cmap='gray')
+            if self.dim_domain == 2:
+                plt.imshow(blurred, cmap='gray')
+            elif self.dim_domain == 3:
+                plt.imshow(blurred[:, :, 0], cmap='gray')
+            elif self.dim_domain == 4:
+                plt.imshow(blurred[int(blurred.shape[0] / 2), int(blurred.shape[1] / 2), :, :], cmap='gray')
+
             plt.colorbar()
             plt.title(
                 "num peaks: {0:.2f}, sigma: {1:.2f} (a^2: {2:.2f}) bmen: {3:.2f} bmed: {4:.2f}".format(peaks.shape[0],
@@ -834,7 +846,12 @@ class Smoe:
         # peaks = peak_local_max(blurred, num_peaks=self.num_inc_kernels)
         peaks, a = self.calc_peaks_inc(threshold_rel=threshold_rel, plot_dir=plot_dir)
         musX_inc = peaks / self.image.shape[0:-1]
-        pis_inc = self.pis_init
+        curr_pis = self.get_params()['pis']
+        pi_mean = np.mean(curr_pis[curr_pis > 0])
+        pi_median = np.median(curr_pis[curr_pis > 0])
+        #pis_inc = np.ones_like(self.pis_init) * pi_mean
+        pis_inc = np.ones_like(self.pis_init) * pi_median
+        # pis_inc = self.pis_init
         gamma_e_inc = np.zeros_like(self.gamma_e_init)
         nu_e_inc = np.ones_like(self.nu_e_init) * 0.5
 
@@ -864,7 +881,7 @@ class Smoe:
         proto[self.add_kernel_slots + self.start_pis::] = True
         for k in range(self.start_batches):
             self.kernel_list_per_batch[k] = np.logical_or(self.kernel_list_per_batch[k], proto)
-        #self.kernel_list_per_batch = [np.ones((self.add_kernel_slots + 2*self.start_pis,), dtype=bool)] * self.start_batches
+        self.kernel_list_per_batch = [np.ones((self.add_kernel_slots + 2*self.start_pis,), dtype=bool)] * self.start_batches
 
     def apply_inc(self):
         self.session.run([self.assign_inc_opt_vars_op], feed_dict={self.insert_pos: self.kernel_count})
