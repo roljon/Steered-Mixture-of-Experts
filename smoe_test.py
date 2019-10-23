@@ -50,6 +50,9 @@ def main(image_path, results_path, iterations, iterations_inc, inc_steps, thresh
             shutil.rmtree(results_path)
         os.mkdir(results_path)
 
+    if len(kernels_per_dim) == 1:
+        kernels_per_dim = [kernels_per_dim[0]] * len(orig.shape[:-1])
+
     loss_plotter = LossPlotter(path=results_path + "/loss.png", quiet=True)
     image_plotter = ImagePlotter(path=results_path, options=['orig', 'reconstruction', 'gating', 'pis_hist'], quiet=True)
     logger = ModelLogger(path=results_path, as_media=True)

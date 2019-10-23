@@ -1,16 +1,15 @@
 import numpy as np
-import math
-import cv2
 import os
 from skimage.feature import peak_local_max
 from skimage.measure import compare_ssim
 import matplotlib.pyplot as plt
 import tensorflow as tf
-from tensorflow.python.ops.special_math_ops import _exponential_space_einsum as einsum
+from ops.special_math_ops import exponential_space_einsum as einsum
 import progressbar
 from itertools import product, combinations
 from quantizer import quantize_params, rescaler
 from scipy.ndimage import gaussian_filter
+from ops.image_ops_impl import custom_ssim
 
 class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1,
@@ -167,7 +166,8 @@ class Smoe:
         if init_params:
             self.pis_init = init_params['pis']
             self.musX_init = init_params['musX']
-            self.A_init = init_params['A']
+            #self.A_init = init_params['A']
+            self.A_init = init_params['A_diagonal'] + init_params['A_corr']
             self.gamma_e_init = init_params['gamma_e']
             self.nu_e_init = init_params['nu_e']
         else:
@@ -191,6 +191,7 @@ class Smoe:
 
         self.init_model(self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init, add_kernel_slots)
         self.initialize_kernel_list(add_kernel_slots)
+        #self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches
 
     def init_model(self, nu_e_init, gamma_e_init, pis_init, musX_init, A_init, add_kernel_slots=0):
 
@@ -307,7 +308,7 @@ class Smoe:
 
         # Quantization of parameters (if requested)
         if self.quantization_mode >= 2 or self.quantize_pis:
-            self.qpis = tf.fake_quant_with_min_max_args(concat_pis, min=self.lower_bounds[3],
+            self.qpis = tf.quantization.fake_quant_with_min_max_args(concat_pis, min=self.lower_bounds[3],
                                                         max=self.upper_bounds[3], num_bits=self.bit_depths[3])
         else:
             self.qpis = concat_pis
@@ -315,41 +316,41 @@ class Smoe:
         pis_mask = self.qpis > 0
 
         if self.quantization_mode == 2:
-            self.qA_diagonal = tf.fake_quant_with_min_max_args(concat_A_diagonal, min=self.lower_bounds[0],
+            self.qA_diagonal = tf.quantization.fake_quant_with_min_max_args(concat_A_diagonal, min=self.lower_bounds[0],
                                                                max=self.upper_bounds[0], num_bits=self.bit_depths[0])
-            self.qA_corr = tf.fake_quant_with_min_max_args(concat_A_corr, min=self.lower_bounds[0],
+            self.qA_corr = tf.quantization.fake_quant_with_min_max_args(concat_A_corr, min=self.lower_bounds[0],
                                                            max=self.upper_bounds[0], num_bits=self.bit_depths[0])
 
-            self.qmusX = tf.fake_quant_with_min_max_args(concat_musX,
+            self.qmusX = tf.quantization.fake_quant_with_min_max_args(concat_musX,
                                                          min=self.lower_bounds[1], max=self.upper_bounds[1],
                                                          num_bits=self.bit_depths[1])
-            self.qnu_e = tf.fake_quant_with_min_max_args(concat_nu_e,
+            self.qnu_e = tf.quantization.fake_quant_with_min_max_args(concat_nu_e,
                                                          min=self.lower_bounds[2], max=self.upper_bounds[2],
                                                          num_bits=self.bit_depths[2])
-            self.qgamma_e = tf.fake_quant_with_min_max_args(concat_gamma_e,
+            self.qgamma_e = tf.quantization.fake_quant_with_min_max_args(concat_gamma_e,
                                                             min=self.lower_bounds[4], max=self.upper_bounds[4],
                                                             num_bits=self.bit_depths[4])
         elif self.quantization_mode == 3:
             if self.radial_as:
                 min_A_diagonal = tf.reduce_min(tf.boolean_mask(concat_A_diagonal, pis_mask))
                 max_A_diagonal = tf.reduce_max(tf.boolean_mask(concat_A_diagonal, pis_mask))
-                qA_diagonal = tf.fake_quant_with_min_max_vars(concat_A_diagonal, min=0,
+                qA_diagonal = tf.quantization.fake_quant_with_min_max_vars(concat_A_diagonal, min=0,
                                                               max=max_A_diagonal - min_A_diagonal,
                                                               num_bits=self.bit_depths[0])
                 self.qA_diagonal = qA_diagonal + min_A_diagonal
             else:
-                min_A_diagonal = tf.reduce_min(tf.matrix_diag_part(tf.boolean_mask(concat_A_diagonal, pis_mask)))
-                max_A_diagonal = tf.reduce_max(tf.matrix_diag_part(tf.boolean_mask(concat_A_diagonal, pis_mask)))
-                qA_diagonal = tf.fake_quant_with_min_max_vars(concat_A_diagonal - min_A_diagonal, min=0,
+                min_A_diagonal = tf.reduce_min(tf.linalg.diag_part(tf.boolean_mask(concat_A_diagonal, pis_mask)))
+                max_A_diagonal = tf.reduce_max(tf.linalg.diag_part(tf.boolean_mask(concat_A_diagonal, pis_mask)))
+                qA_diagonal = tf.quantization.fake_quant_with_min_max_vars(concat_A_diagonal - min_A_diagonal, min=0,
                                                               max=max_A_diagonal - min_A_diagonal,
                                                               num_bits=self.bit_depths[0])
                 self.qA_diagonal = qA_diagonal + min_A_diagonal
-            self.qA_corr = tf.fake_quant_with_min_max_vars(concat_A_corr,
+            self.qA_corr = tf.quantization.fake_quant_with_min_max_vars(concat_A_corr,
                                                            min=tf.reduce_min(tf.boolean_mask(concat_A_corr, pis_mask)),
                                                            max=tf.reduce_max(tf.boolean_mask(concat_A_corr, pis_mask)),
                                                            num_bits=self.bit_depths[0])
             if self.train_musx:
-                self.qmusX = tf.fake_quant_with_min_max_vars(concat_musX,
+                self.qmusX = tf.quantization.fake_quant_with_min_max_vars(concat_musX,
                                                              min=tf.reduce_min(tf.boolean_mask(concat_musX, pis_mask)),
                                                              max=tf.reduce_max(tf.boolean_mask(concat_musX, pis_mask)),
                                                              num_bits=self.bit_depths[1])
@@ -358,10 +359,10 @@ class Smoe:
 
             min_nu_e = tf.reduce_min(tf.boolean_mask(concat_nu_e, pis_mask))
             max_nu_e = tf.reduce_max(tf.boolean_mask(concat_nu_e, pis_mask))
-            qnu_e = tf.fake_quant_with_min_max_vars(concat_nu_e - min_nu_e, min=0, max=max_nu_e-min_nu_e, num_bits=self.bit_depths[2])
+            qnu_e = tf.quantization.fake_quant_with_min_max_vars(concat_nu_e - min_nu_e, min=0, max=max_nu_e-min_nu_e, num_bits=self.bit_depths[2])
             self.qnu_e = qnu_e + min_nu_e
 
-            self.qgamma_e = tf.fake_quant_with_min_max_vars(concat_gamma_e,
+            self.qgamma_e = tf.quantization.fake_quant_with_min_max_vars(concat_gamma_e,
                                                             min=tf.reduce_min(tf.boolean_mask(concat_gamma_e, pis_mask)),
                                                             max=tf.reduce_max(tf.boolean_mask(concat_gamma_e, pis_mask)),
                                                             num_bits=self.bit_depths[4])
@@ -405,8 +406,8 @@ class Smoe:
             self.qgamma_e = self.qgamma_e * gamma_mask
 
         # combine A_diagonal and A_corr and use only triangular part
-        A = tf.matrix_band_part(A_diagonal, 0, 0) \
-            + tf.matrix_band_part(tf.matrix_set_diag(A_corr, np.zeros((num_of_all_kernels, self.dim_domain))), -1, 0)
+        A = tf.linalg.band_part(A_diagonal, 0, 0) \
+            + tf.linalg.band_part(tf.linalg.set_diag(A_corr, np.zeros((num_of_all_kernels, self.dim_domain))), -1, 0)
 
         bool_mask = tf.logical_and(self.kernel_list, pis_mask)
 
@@ -468,6 +469,8 @@ class Smoe:
         kernel_list_batch_op = tf.reduce_sum(bool_mask_infl, axis=1) > 0 # 10 ** -9
         self.w_e_max_op = tf.reshape(tf.argmax(tf.boolean_mask(self.w_e_op, kernel_list_batch_op), axis=0), self.batch_shape[:-1])
         self.indices = tf.boolean_mask(self.indices, kernel_list_batch_op)
+        self.w_e_out_op = tf.boolean_mask(self.w_e_op, kernel_list_batch_op)
+        self.w_e_out_op = tf.reshape(self.w_e_out_op, (tf.shape(self.w_e_out_op)[0],) + self.batch_shape[:-1])
 
         nu_e = tf.expand_dims(tf.transpose(nu_e), axis=-1)
         if self.train_gammas:
@@ -496,7 +499,7 @@ class Smoe:
                                            tf.assign(self.gamma_e_best_var, self.qgamma_e),
                                            tf.assign(self.nu_e_best_var, self.qnu_e))
 
-        self.res = tf.fake_quant_with_min_max_args(self.res, min=0, max=1, num_bits=self.precision)
+        self.res = tf.quantization.fake_quant_with_min_max_args(self.res, min=0, max=1, num_bits=self.precision)
         #mse = tf.reduce_mean(tf.square(tf.round(self.res * 255) / 255 - self.target_op))
 
         if self.dim_domain >= 4:
@@ -518,7 +521,7 @@ class Smoe:
             else:
                 loss_pixel = tf.reduce_mean(loss_pixel)
         else:
-            if self.use_yuv:
+            if False: #self.use_yuv: # keep that code snippet for future ssim per frame option
                 res_y = tf.reshape(self.res[:, 0], self.batch_shape[:-1] + (1,))
                 res_u = tf.reshape(self.res[:, 1], self.batch_shape[:-1] + (1,))
                 res_v = tf.reshape(self.res[:, 2], self.batch_shape[:-1] + (1,))
@@ -549,15 +552,18 @@ class Smoe:
                     target_y = tf.pad(target_y, paddings, "SYMMETRIC")
                     target_u = tf.pad(target_u, paddings, "SYMMETRIC")
                     target_v = tf.pad(target_v, paddings, "SYMMETRIC")
+
                     for ii in range(self.batch_shape[2]):
                         ssim_y.append(tf.image.ssim(res_y[:, :, ii, :], target_y[:, :, ii, :], max_val=1))
                         ssim_u.append(tf.image.ssim(res_u[:, :, ii, :], target_u[:, :, ii, :], max_val=1))
                         ssim_v.append(tf.image.ssim(res_v[:, :, ii, :], target_v[:, :, ii, :], max_val=1))
+
                     loss_pixel = 1 - (6/8 * tf.reduce_mean(ssim_y)
                                       + 1/8 * tf.reduce_mean(ssim_u)
                                       + 1/8 * tf.reduce_mean(ssim_v))
 
-            else:
+
+            else: # Use Custom SSIM
                 res = tf.reshape(self.res, self.batch_shape[:-1] + (num_channels,))
                 self.target_op = tf.reshape(self.target_op, self.batch_shape[:-1] + (num_channels,))
 
@@ -566,16 +572,19 @@ class Smoe:
                     res = tf.pad(res, paddings, "SYMMETRIC")
                     self.target_op = tf.pad(self.target_op, paddings, "SYMMETRIC")
 
-                    loss_pixel = 1 - tf.image.ssim(res, self.target_op, max_val=1)
+                    ssim_per_channel = custom_ssim(res, self.target_op, max_val=1)
                 elif self.dim_domain == 3:
-                    ssim = []
-                    paddings = tf.constant([[5, 5], [5, 5], [0, 0], [0, 0]])
+                    paddings = tf.constant([[5, 5], [5, 5], [5, 5], [0, 0]])
                     res = tf.pad(res, paddings, "SYMMETRIC")
                     self.target_op = tf.pad(self.target_op, paddings, "SYMMETRIC")
-                    for ii in range(self.batch_shape[2]):
-                        ssim.append(tf.image.ssim(res[:, :, ii, :], self.target_op[:, :, ii, :], max_val=1))
-                    ssim = tf.reduce_mean(ssim)
-                    loss_pixel = 1 - ssim
+
+                    ssim_per_channel = custom_ssim(res, self.target_op, max_val=1, ndim=3)
+
+                if self.use_yuv:
+                    ssim = tf.reduce_sum(ssim_per_channel * [6, 1, 1], [-1]) / 8
+                else:
+                    ssim = tf.reduce_mean(ssim_per_channel, [-1])
+                loss_pixel = 1 - ssim
 
         self.num_pi_op = tf.count_nonzero(pis_mask)
 
@@ -589,7 +598,7 @@ class Smoe:
         #u_l1 = self.u_l1 * tf.reduce_sum(tf.matrix_diag_part(A) ** 2)
         #u_l1 = self.u_l1 * tf.reduce_sum(rxx_det) #/ self.start_pis # * (tf.cast(self.num_pi_op, tf.float32) / self.start_pis)
         #u_l1 = self.u_l1 * tf.reduce_sum(tf.pow(tf.matrix_diag_part(A)-40, 2))
-        u_l1 = self.u_l1 * tf.reduce_sum(tf.matrix_diag_part(A)) # * (tf.cast(self.num_pi_op, tf.float32) / self.start_pis)
+        u_l1 = self.u_l1 * tf.reduce_sum(tf.linalg.diag_part(A)) # * (tf.cast(self.num_pi_op, tf.float32) / self.start_pis)
         #'''
 
         self.loss_op = loss_pixel + pis_l1 + u_l1
@@ -1007,6 +1016,7 @@ class Smoe:
         # only for update update_reconstruction=True
         reconstructions = []
         w_es = []
+        weight_matrices = []
 
         widgets = [
             progressbar.AnimatedMarker(markers='◐◓◑◒'),
@@ -1047,6 +1057,7 @@ class Smoe:
             if train_inc:
                 retrieve.append(self.accum_inc_ops)
 
+            retrieve.append(self.w_e_out_op)
             retrieve.append(self.sampl_prob)
 
             results = self.session.run(retrieve, feed_dict=feed_dict)
@@ -1062,6 +1073,15 @@ class Smoe:
                         reconstructions.append(results[4])
                         w_es.append(results[3][results[5]])
 
+            if self.add_kernel_slots > 0:
+                num_all_kernels = 2*self.start_pis + self.add_kernel_slots
+            else:
+                num_all_kernels = self.start_pis
+
+            w_matrix = np.zeros((num_all_kernels,) + self.joint_domain_batched.shape[1:-1])
+            w_matrix[results[3]] = results[-2]
+            weight_matrices.append(w_matrix)
+
             loss_val += results[0] * np.prod(self.joint_domain_batched.shape[1:-1]) / self.num_pixel
             mse_val += results[1] * np.prod(self.joint_domain_batched.shape[1:-1]) / self.num_pixel
             num_pi = results[2]
@@ -1076,13 +1096,18 @@ class Smoe:
         if update_reconstruction:
             reconstruction = np.stack(reconstructions)
             w_e = np.stack(w_es)
+            weight_matrix = np.stack(weight_matrices)
             if not with_quantized_params:
                 self.reconstruction_image = self.uncubify(reconstruction, self.image.shape)
                 self.weight_matrix_argmax = self.uncubify(w_e, self.image.shape[0:self.image.ndim-1])
+                self.weight_matrix = self.uncubify(weight_matrix,
+                                                   (num_all_kernels,) + self.image.shape[0:self.image.ndim - 1])
                 self.valid = True
             else:
                 self.qreconstruction_image = self.uncubify(reconstruction, self.image.shape)
                 self.qweight_matrix_argmax = self.uncubify(w_e, self.image.shape[0:self.image.ndim - 1])
+                self.qweight_matrix = self.uncubify(weight_matrix,
+                                                   (num_all_kernels,) + self.image.shape[0:self.image.ndim - 1])
                 self.qvalid = True
 
         if train:
