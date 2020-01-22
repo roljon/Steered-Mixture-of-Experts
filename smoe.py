@@ -11,11 +11,31 @@ from quantizer import quantize_params, rescaler
 from scipy.ndimage import gaussian_filter
 from ops.image_ops_impl import custom_ssim
 
+
+def sliding_window(image, Overlap, BatchSize):
+    # slide a window across the image
+    if len(image.shape) == 3: # image case
+        image = np.pad(image, ((Overlap, Overlap), (Overlap, Overlap), (0, 0)), 'constant', constant_values=0)
+        for y in range(0, image.shape[0] - 2 * Overlap, BatchSize[0]):
+            for x in range(0, image.shape[1] - 2 * Overlap, BatchSize[1]):
+                # yield the current window
+                yield (np.array([y - Overlap, x - Overlap]), image[y:y + BatchSize[0] + 2 * Overlap,
+                                                             x:x + BatchSize[1] + 2 * Overlap, :])
+    elif len(image.shape) == 4: # video case
+        image = np.pad(image, ((Overlap, Overlap), (Overlap, Overlap), (Overlap, Overlap), (0, 0)), 'constant', constant_values=0)
+        for y in range(0, image.shape[0] - 2 * Overlap, BatchSize[0]):
+            for x in range(0, image.shape[1] - 2 * Overlap, BatchSize[1]):
+                for z in range(0, image.shape[2] - 2 * Overlap, BatchSize[2]):
+                    # yield the current window
+                    yield (np.array([y - Overlap, x - Overlap, z - Overlap]),
+                           image[y:y + BatchSize[0] + 2 * Overlap, x:x + BatchSize[1] + 2 * Overlap,
+                           z:z + BatchSize[2] + 2 * Overlap, :])
+
 class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1,
-                 train_gammas=True, train_musx=True, use_diff_center=False, radial_as=False, use_determinant=False,
+                 batch_size=None, train_gammas=True, train_musx=True, use_diff_center=False, radial_as=False, use_determinant=False,
                  normalize_pis=True, quantization_mode=0, bit_depths=None, quantize_pis=False, lower_bounds=None,
-                 upper_bounds=None, use_yuv=True, only_y_gamma=False, ssim_opt=False, precision=8, add_kernel_slots=0, iter_offset=0, margin=0.5):
+                 upper_bounds=None, use_yuv=True, only_y_gamma=False, ssim_opt=False, precision=8, add_kernel_slots=0, iter_offset=0, margin=0.5, overlap_of_batches=0):
         self.batch_shape = None
         self.use_yuv = use_yuv
         self.only_y_gamma = only_y_gamma
@@ -137,6 +157,8 @@ class Smoe:
         self.weight_matrix_argmax = None
         self.qreconstruction_image = None
         self.qweight_matrix_argmax = None
+        self.weight_matrix = None
+        self.qweight_matrix = None
         self.train_pis = train_pis
         self.train_gammas = train_gammas
         self.train_musx = train_musx
@@ -152,13 +174,27 @@ class Smoe:
         self.start_batches = start_batches  # start_batches corresponds to desired batch numbers
         self.image = image
         self.image_flat = None
-        self.joint_domain_batched = None
         self.dim_domain = image.ndim - 1
         self.num_pixel = np.prod(image.shape[0:self.dim_domain])
         self.init_domain_and_target()
-        self.neighboring_batches_ind = self.find_neighboring_indices(self.image.shape, self.joint_domain_batched.shape)
-        self.batches = start_batches
-        self.start_batches = self.joint_domain_batched.shape[0]
+
+        if batch_size[0] is not None:
+            if len(batch_size) == self.dim_domain:
+                self.batch_size_valued = batch_size
+            elif len(batch_size) == 1:
+                self.batch_size_valued = batch_size * np.ones((self.dim_domain,), dtype=np.int)
+            else:
+                raise ValueError("Required BatchSize doesn't fit to input dimension")
+            # sanity check otherwise error
+            for ii in range(self.dim_domain):
+                if self.joint_domain.shape[ii] % self.batch_size_valued[ii] > 0:
+                    raise ValueError("Required BatchSize is not compatible to input dimensions")
+        else:
+            self.batch_size_valued = self.batch_shape[0:-1]
+        self.overlap = overlap_of_batches
+        self.batch_size = tuple(np.array(self.batch_size_valued) + 2*self.overlap)
+
+        self.start_batches = np.int(np.prod(np.ceil(np.array(self.image.shape[:-1]) / np.array(self.batch_size_valued))))
 
         assert kernels_per_dim is not None or init_params is not None, \
             "You need to specify the kernel grid size or give initial parameters."
@@ -182,7 +218,9 @@ class Smoe:
 
         self.margin = margin
 
-        self.random_sampling_per_batch = [np.ones((np.prod(self.joint_domain_batched.shape[1:self.dim_domain+1]),), dtype=np.float32) / np.prod(self.joint_domain_batched.shape[1:self.dim_domain+1])] * self.start_batches
+        self.random_sampling_per_batch = [np.ones((np.prod(self.batch_size),),
+                                                  dtype=np.float32) / np.prod(
+            self.batch_size)] * self.start_batches
         self.get_train_mask()
 
         gpu_options = tf.GPUOptions(allow_growth=True)
@@ -380,9 +418,7 @@ class Smoe:
 
         self.joint_domain_batched_op = tf.placeholder(shape=(None, self.dim_domain + num_channels), dtype=tf.float32)
 
-
         self.target_op = self.joint_domain_batched_op[:, self.dim_domain:]
-        #self.target_op = tf.reshape(self.target_op, [-1])
         self.domain_op = self.joint_domain_batched_op[:, :self.dim_domain]
 
         self.kernel_list = tf.placeholder(shape=(None,), dtype=tf.bool)
@@ -464,13 +500,13 @@ class Smoe:
         bool_mask_infl = tf.cast(tf.greater(self.w_e_op, minimum_influence), tf.float32)
         self.w_e_op = self.w_e_op * bool_mask_infl
 
-        #self.w_e_max_op = tf.reshape(tf.argmax(self.w_e_op, axis=0), self.batch_shape[:-1])
-
         kernel_list_batch_op = tf.reduce_sum(bool_mask_infl, axis=1) > 0 # 10 ** -9
-        self.w_e_max_op = tf.reshape(tf.argmax(tf.boolean_mask(self.w_e_op, kernel_list_batch_op), axis=0), self.batch_shape[:-1])
+        self.batch_size_op = tf.placeholder(shape=None, dtype=tf.int32)
+        self.w_e_max_op = tf.reshape(tf.argmax(tf.boolean_mask(self.w_e_op, kernel_list_batch_op), axis=0),
+                                     self.batch_size)
         self.indices = tf.boolean_mask(self.indices, kernel_list_batch_op)
         self.w_e_out_op = tf.boolean_mask(self.w_e_op, kernel_list_batch_op)
-        self.w_e_out_op = tf.reshape(self.w_e_out_op, (tf.shape(self.w_e_out_op)[0],) + self.batch_shape[:-1])
+        self.w_e_out_op = tf.reshape(self.w_e_out_op, (tf.shape(self.w_e_out_op)[0],) + self.batch_size)
 
         nu_e = tf.expand_dims(tf.transpose(nu_e), axis=-1)
         if self.train_gammas:
@@ -506,10 +542,18 @@ class Smoe:
             diff = tf.boolean_mask(self.res - self.target_op, self.train_mask)
         else:
             diff = self.res - self.target_op
+        err_map = tf.reduce_mean(tf.square(diff), axis=1)
+        self.sampl_prob = err_map / tf.reduce_sum(err_map)
+
+        if self.overlap > 0:
+            diff = tf.reshape(diff, self.batch_size + (num_channels,))
+            if self.dim_domain == 2:
+                diff = diff[self.overlap:-self.overlap, self.overlap:-self.overlap, :]
+            elif self.dim_domain == 3:
+                diff = diff[self.overlap:-self.overlap, self.overlap:-self.overlap, self.overlap:-self.overlap, :]
+
         squared_diff = tf.square(diff)
         mse = tf.reduce_mean(squared_diff)
-        err_map = tf.reduce_mean(squared_diff, axis=1)
-        self.sampl_prob = err_map / tf.reduce_sum(err_map)
 
         if not self.ssim_opt:
             # margin in pixel to determine epsilon
@@ -564,8 +608,16 @@ class Smoe:
 
 
             else: # Use Custom SSIM
-                res = tf.reshape(self.res, self.batch_shape[:-1] + (num_channels,))
-                self.target_op = tf.reshape(self.target_op, self.batch_shape[:-1] + (num_channels,))
+                res = tf.reshape(self.res, self.batch_size + (num_channels,))
+                self.target_op = tf.reshape(self.target_op, self.batch_size + (num_channels,))
+
+                if self.overlap > 0:
+                    if self.dim_domain == 2:
+                        res = res[self.overlap:-self.overlap, self.overlap:-self.overlap, :]
+                        self.target_op = self.target_op[self.overlap:-self.overlap, self.overlap:-self.overlap, :]
+                    elif self.dim_domain == 3:
+                        res = res[self.overlap:-self.overlap, self.overlap:-self.overlap, self.overlap:-self.overlap, :]
+                        self.target_op = self.target_op[self.overlap:-self.overlap, self.overlap:-self.overlap, self.overlap:-self.overlap, :]
 
                 if self.dim_domain == 2:
                     paddings = tf.constant([[5, 5], [5, 5], [0, 0]])
@@ -605,7 +657,8 @@ class Smoe:
 
         self.mse_op = mse * ((2**self.precision) ** 2)
 
-        self.res = tf.reshape(self.res, self.batch_shape[:-1] + (num_channels,))
+        #self.res = tf.reshape(self.res, self.batch_shape[:-1] + (num_channels,))
+        self.res = tf.reshape(self.res, self.batch_size + (num_channels,))
 
         init_new_vars_op = tf.global_variables_initializer()
         self.session.run(init_new_vars_op)
@@ -997,7 +1050,9 @@ class Smoe:
         print("end loss/mse: ", loss_val, "/", mse_val, "@iter: ", i)
         print("best loss/mse: ", self.best_loss, "/", self.best_mse)
 
+
     def run_batched(self, pis_l1=0, u_l1=0, train=True, update_reconstruction=False, with_quantized_params=False, sampling_percentage=100, with_inc=False, train_inc=False):
+
         self.valid = False
         if with_quantized_params:
             self.qvalid = False
@@ -1013,27 +1068,32 @@ class Smoe:
         loss_val = 0
         mse_val = 0
         num_pi = -1
+
         # only for update update_reconstruction=True
-        reconstructions = []
-        w_es = []
-        weight_matrices = []
+        reconstruction_ = np.zeros_like(self.image)
+        w_e_ = np.zeros(self.image.shape[0:-1])
+        if self.add_kernel_slots > 0:
+            num_all_kernels = 2 * self.start_pis + self.add_kernel_slots
+        else:
+            num_all_kernels = self.start_pis
+        w_matrix = np.zeros((num_all_kernels,) + self.image.shape[:-1])
 
         widgets = [
             progressbar.AnimatedMarker(markers='◐◓◑◒'),
             ' Iteration: {0}  '.format(self.iter),
-            progressbar.Percentage(),
             ' ', progressbar.Counter('%(value)d/{0}'.format(self.start_batches)),
-            ' ', progressbar.Bar('>'),
             ' ', progressbar.Timer(),
-            ' ', progressbar.ETA()
         ]
         bar = progressbar.ProgressBar(widgets=widgets)
-        for ii in bar(range(self.start_batches)):
+
+        ii = -1
+        for (coord, batch) in bar(sliding_window(self.joint_domain, self.overlap, self.batch_size_valued)):
+            ii = ii + 1
             retrieve = [self.loss_op, self.mse_op, self.num_pi_op]
             if not with_quantized_params:
                 retrieve.append(self.indices)
 
-            img_patch = self.joint_domain_batched[ii].reshape(-1, self.joint_domain_batched[ii].shape[-1])
+            img_patch = batch.reshape(-1, batch.shape[-1])
 
             if train and self.dim_domain >= 4:
                 img_patch = img_patch[self.train_mask]
@@ -1041,10 +1101,9 @@ class Smoe:
             if train and not self.ssim_opt and sampling_percentage < 100:
                 num_samples = np.uint32(np.round(img_patch.shape[0] * sampling_percentage/100))
                 samples = np.random.choice(img_patch.shape[0], (num_samples,), replace=False, p=self.random_sampling_per_batch[ii])
-            else:
-                samples = np.arange(img_patch.shape[0])
+                img_patch = img_patch[samples, :]
 
-            feed_dict = {self.joint_domain_batched_op: img_patch[samples, :], self.pis_l1: pis_l1, self.u_l1: u_l1,
+            feed_dict = {self.joint_domain_batched_op: img_patch, self.pis_l1: pis_l1, self.u_l1: u_l1,
                          self.kernel_list: self.kernel_list_per_batch[ii], self.stack_inc: [1.] if with_inc else [0.],
                          self.stack_orig: [1.]}
             if train:
@@ -1057,33 +1116,61 @@ class Smoe:
             if train_inc:
                 retrieve.append(self.accum_inc_ops)
 
-            retrieve.append(self.w_e_out_op)
-            retrieve.append(self.sampl_prob)
+            if update_reconstruction:
+                retrieve.append(self.w_e_out_op)
+                retrieve.append(self.sampl_prob)
 
             results = self.session.run(retrieve, feed_dict=feed_dict)
             if update_reconstruction:
                 if train:
-                    reconstructions.append(results[5])
-                    w_es.append(results[3][results[6]])
+                    rec_batch = results[5]
+                    w_e_batch = results[3][results[6]]
                 else:
                     if with_quantized_params:
-                        reconstructions.append(results[3])
-                        w_es.append(results[4])
+                        rec_batch = results[3]
+                        w_e_batch = results[3][results[4]]
                     else:
-                        reconstructions.append(results[4])
-                        w_es.append(results[3][results[5]])
+                        rec_batch = results[4]
+                        w_e_batch = results[3][results[5]]
 
-            if self.add_kernel_slots > 0:
-                num_all_kernels = 2*self.start_pis + self.add_kernel_slots
-            else:
-                num_all_kernels = self.start_pis
+                start_y = coord[0] + self.overlap
+                start_x = coord[1] + self.overlap
+                end_y = start_y + self.batch_size_valued[0]
+                end_x = start_x + self.batch_size_valued[1]
+                if self.dim_domain == 2:
+                    reconstruction_[start_y:end_y, start_x:end_x, :] \
+                        = rec_batch[self.overlap:self.overlap + self.batch_size_valued[0],
+                          self.overlap:self.overlap + self.batch_size_valued[1], :]
+                    w_e_[start_y:end_y, start_x:end_x] \
+                        = w_e_batch[self.overlap:self.overlap + self.batch_size_valued[0],
+                          self.overlap:self.overlap + self.batch_size_valued[1]]
+                elif self.dim_domain == 3:
+                    start_z = coord[2] + self.overlap
+                    end_z = start_z + self.batch_size_valued[2]
+                    reconstruction_[start_y:end_y, start_x:end_x, start_z:end_z, :] \
+                        = rec_batch[self.overlap:self.overlap + self.batch_size_valued[0],
+                          self.overlap:self.overlap + self.batch_size_valued[1],
+                          self.overlap:self.overlap + self.batch_size_valued[2], :]
+                    w_e_[start_y:end_y, start_x:end_x, start_z:end_z] \
+                        = w_e_batch[self.overlap:self.overlap + self.batch_size_valued[0],
+                          self.overlap:self.overlap + self.batch_size_valued[1],
+                          self.overlap:self.overlap + self.batch_size_valued[2]]
 
-            w_matrix = np.zeros((num_all_kernels,) + self.joint_domain_batched.shape[1:-1])
-            w_matrix[results[3]] = results[-2]
-            weight_matrices.append(w_matrix)
 
-            loss_val += results[0] * np.prod(self.joint_domain_batched.shape[1:-1]) / self.num_pixel
-            mse_val += results[1] * np.prod(self.joint_domain_batched.shape[1:-1]) / self.num_pixel
+            if update_reconstruction:
+                if self.dim_domain == 2:
+                    w_matrix[results[3], start_y:end_y, start_x:end_x] = results[-2][:,
+                                self.overlap:self.overlap + self.batch_size_valued[0],
+                                self.overlap:self.overlap + self.batch_size_valued[1]]
+                elif self.dim_domain == 3:
+                    w_matrix[results[3], start_y:end_y, start_x:end_x, start_z:end_z] = results[-2][:,
+                                                self.overlap:self.overlap + self.batch_size_valued[0],
+                                                self.overlap:self.overlap + self.batch_size_valued[1],
+                                                self.overlap:self.overlap + self.batch_size_valued[2]]
+
+            loss_val += results[0] * np.prod(self.batch_size_valued) / self.num_pixel
+            mse_val += results[1] * np.prod(self.batch_size_valued) / self.num_pixel
+
             num_pi = results[2]
             if not with_quantized_params:
                 bool_mask = np.zeros_like(self.kernel_list_per_batch[ii])
@@ -1094,20 +1181,16 @@ class Smoe:
                 self.random_sampling_per_batch[ii] = results[-1]
 
         if update_reconstruction:
-            reconstruction = np.stack(reconstructions)
-            w_e = np.stack(w_es)
-            weight_matrix = np.stack(weight_matrices)
             if not with_quantized_params:
-                self.reconstruction_image = self.uncubify(reconstruction, self.image.shape)
-                self.weight_matrix_argmax = self.uncubify(w_e, self.image.shape[0:self.image.ndim-1])
-                self.weight_matrix = self.uncubify(weight_matrix,
-                                                   (num_all_kernels,) + self.image.shape[0:self.image.ndim - 1])
+                self.reconstruction_image = reconstruction_
+                self.weight_matrix_argmax = w_e_
+
+                self.weight_matrix = w_matrix
                 self.valid = True
             else:
-                self.qreconstruction_image = self.uncubify(reconstruction, self.image.shape)
-                self.qweight_matrix_argmax = self.uncubify(w_e, self.image.shape[0:self.image.ndim - 1])
-                self.qweight_matrix = self.uncubify(weight_matrix,
-                                                   (num_all_kernels,) + self.image.shape[0:self.image.ndim - 1])
+                self.qreconstruction_image = reconstruction_
+                self.qweight_matrix_argmax = w_e_
+                self.qweight_matrix = w_matrix
                 self.qvalid = True
 
         if train:
@@ -1190,9 +1273,8 @@ class Smoe:
 
     def init_domain_and_target(self):
         joint_domain = self.gen_domain(self.image, self.dim_domain)
-        self.joint_domain_batched = joint_domain
         self.batch_shape = self.get_batch_shape(self.start_batches, joint_domain.shape)
-        self.joint_domain_batched = self.cubify(self.joint_domain_batched, self.batch_shape)
+        self.joint_domain = joint_domain
 
     def get_iter(self):
         return self.iter
@@ -1299,10 +1381,13 @@ class Smoe:
         if add_kernel_slots > 0:
             num_of_all_kernels = 2*num_of_all_kernels + add_kernel_slots
 
-        batch_center = np.mean(self.joint_domain_batched, axis=tuple(np.arange(self.dim_domain) + 1))
+        batch_center = []
+        for (coord, batch) in sliding_window(self.joint_domain, self.overlap, self.batch_size_valued):
+            batch_center.append(np.mean(batch, axis=tuple(np.arange(self.dim_domain))))
+        batch_center = np.stack(batch_center)
 
         maha_dists = []
-        for k in range(self.joint_domain_batched.shape[0]):
+        for k in range(batch_center.shape[0]):
             results = self.session.run([self.maha_dist], feed_dict={self.joint_domain_batched_op:  np.expand_dims(batch_center[k], axis=0),
                                                                  self.kernel_list: np.ones((num_of_all_kernels,),
                                                                                            dtype=bool),
@@ -1312,7 +1397,7 @@ class Smoe:
         maha_dists = np.concatenate(maha_dists, axis=1)
         maha_dist_min_ind = np.argmin(maha_dists, axis=1)
         self.kernel_list_per_batch = []
-        for k in range(self.joint_domain_batched.shape[0]):
+        for k in range(batch_center.shape[0]):
             if add_kernel_slots > 0:
                 self.kernel_list_per_batch.append(np.concatenate(
                     [maha_dist_min_ind == k, np.zeros((add_kernel_slots + self.start_pis,), dtype=bool)]))
@@ -1326,14 +1411,20 @@ class Smoe:
         num_of_all_kernels = self.start_pis
         if add_kernel_slots > 0:
             num_of_all_kernels = 2*num_of_all_kernels + add_kernel_slots
+        # DAMIT DAS HIER WIEDER GEHT, ZUNÄCHST BATCHES ERSTELLEN MIT GENERATOR UND DANN MINS; MAXS BESTIMMEN!!
+        mins = []
+        maxs = []
+        for (coord, batch) in sliding_window(self.joint_domain, self.overlap, self.batch_size_valued):
+            mins.append(np.min(batch, axis=tuple(np.arange(self.dim_domain))))
+            maxs.append(np.max(batch, axis=tuple(np.arange(self.dim_domain))))
+        mins = np.stack(mins)
+        maxs = np.stack(maxs)
 
-        mins = np.min(self.joint_domain_batched, axis=tuple(np.arange(self.dim_domain) + 1))
-        maxs = np.max(self.joint_domain_batched, axis=tuple(np.arange(self.dim_domain) + 1))
         mins = mins[:, 0:self.dim_domain]
         maxs = maxs[:, 0:self.dim_domain]
         # get all corner points of (hyper-)cube and middle points of edges
         tt = np.concatenate((np.expand_dims(mins, axis=-1), np.expand_dims(maxs, axis=-1), np.expand_dims((mins + maxs)/2, axis=-1)), axis=-1)
-        for k in range(self.joint_domain_batched.shape[0]):
+        for k in range(mins.shape[0]):
             edges_batch = np.array(list(product(*tt[k, :, :])))
             edges_batch = np.concatenate((edges_batch, np.zeros((edges_batch.shape[0], self.image.shape[-1]))), axis=1)
             results = self.session.run([self.maha_dist_ind], feed_dict={self.joint_domain_batched_op: edges_batch,
@@ -1362,6 +1453,8 @@ class Smoe:
             train_mask[14, 0:4, :, :] = False
             train_mask[14, 11:, :, :] = False
             self.train_mask = train_mask.reshape(-1)
+
+
 
 
 
@@ -1535,6 +1628,7 @@ class Smoe:
 
         return remapped_wes
 
+    # Not used method, Not sure if it's correct anyway
     @staticmethod
     def find_neighboring_indices(img_shape, batch_shape):
         segments_per_dim = [1]
@@ -1548,3 +1642,5 @@ class Smoe:
         indices = np.unique(np.concatenate(indices))
 
         return indices
+
+

@@ -17,9 +17,9 @@ from utils import save_model, load_params, read_image
 
 
 def main(image_path, results_path, iterations, iterations_inc, inc_steps, threshold_rel, validation_iterations, kernels_per_dim, params_file, l1reg, base_lr,
-         batches, checkpoint_path, lr_div, lr_mult, disable_train_pis, disable_train_gammas, disable_train_musx,
+         batches, batch_size, checkpoint_path, lr_div, lr_mult, disable_train_pis, disable_train_gammas, disable_train_musx,
          use_diff_center, radial_as, use_determinant, normalize_pis, quantization_mode, bit_depths, quantize_pis, lower_bounds,
-         upper_bounds, use_yuv, only_y_gamma, ssim_opt, sampling_percentage, update_kernel_list_iterations):
+         upper_bounds, use_yuv, only_y_gamma, ssim_opt, sampling_percentage, update_kernel_list_iterations, overlap_of_batches):
 
     if len(bit_depths) != 5:
         raise ValueError("Number of bit depths must be five!")
@@ -59,9 +59,9 @@ def main(image_path, results_path, iterations, iterations_inc, inc_steps, thresh
 
     smoe = Smoe(orig, kernels_per_dim, init_params=init_params, train_pis=not disable_train_pis,
                 train_gammas=not disable_train_gammas, train_musx=not disable_train_musx, use_diff_center=use_diff_center, radial_as=radial_as, start_batches=batches,
-                use_determinant=use_determinant, normalize_pis=normalize_pis, quantization_mode=quantization_mode,
+                batch_size=batch_size, use_determinant=use_determinant, normalize_pis=normalize_pis, quantization_mode=quantization_mode,
                 bit_depths=bit_depths, quantize_pis=quantize_pis, lower_bounds=lower_bounds, upper_bounds=upper_bounds,
-                use_yuv=use_yuv, only_y_gamma=only_y_gamma, ssim_opt=ssim_opt, precision=precision, add_kernel_slots=inc_steps*np.prod(kernels_per_dim))
+                use_yuv=use_yuv, only_y_gamma=only_y_gamma, ssim_opt=ssim_opt, precision=precision, add_kernel_slots=inc_steps*np.prod(kernels_per_dim), overlap_of_batches=overlap_of_batches)
 
 
 
@@ -81,6 +81,9 @@ def main(image_path, results_path, iterations, iterations_inc, inc_steps, thresh
 
     if checkpoint_path is not None:
         smoe.restore(checkpoint_path)
+
+    if overlap_of_batches > 0:
+        sampling_percentage = 100 # otherwise it is not working!
 
     smoe.train(iterations, val_iter=validation_iterations, pis_l1=l1reg, sampling_percentage=sampling_percentage,
                callbacks=[loss_plotter.plot, image_plotter.plot, logger.log])
@@ -122,7 +125,9 @@ if __name__ == '__main__':
     parser.add_argument('-p', '--params_file', type=str, default=None, help="parameter file for model initialization")
     parser.add_argument('-reg', '--l1reg', type=float, default=0, help="l1 regularization for pis")
     parser.add_argument('-lr', '--base_lr', type=float, default=0.001, help="base learning rate")
-    parser.add_argument('-b', '--batches', type=int, default=1, help="number of batches to split the training into (will be automaticly reduced when number of pis drops")
+    parser.add_argument('-b', '--batches', type=int, default=1, help="number of batches to split the training into")
+    parser.add_argument('-bz', '--batch_size', type=int, default=[None], nargs='+',
+                        help="number of kernels per dimension")
     parser.add_argument('-c', '--checkpoint_path', type=str, default=None, help="path to a checkpoint file to continue the training. EXPERIMENTAL.")
     parser.add_argument('-d', '--lr_div', type=float, default=100, help="div for pis lr")
     parser.add_argument('-m', '--lr_mult', type=float, default=1000, help="mult for a lr")
@@ -164,9 +169,14 @@ if __name__ == '__main__':
     parser.add_argument('-ssim', '--ssim_opt', type=str2bool, nargs='?',
                         const=False, default=False,
                         help="SSIM optimization instead of MSE.")
-    parser.add_argument('-sp', '--sampling_percentage', type=int, default=100, help="How many samples were used for each update step in percentage")
+    parser.add_argument('-sp', '--sampling_percentage', type=int, default=100, help="How many samples were used for each"
+                                                                                    " update step in percentage (only"
+                                                                                    " working if mse optimzed and batch"
+                                                                                    " overlap equal 0")
     parser.add_argument('-ukl', '--update_kernel_list_iterations', type=int, default=None,
                         help="number of iterations between kernel list updates")
+    parser.add_argument('-ovl', '--overlap_of_batches', type=int, default=0,
+                        help="number of pixels they overlap between batches in each dimension")
 
     args = parser.parse_args()
 
