@@ -10,6 +10,7 @@ from itertools import product, combinations
 from quantizer import quantize_params, rescaler
 from scipy.ndimage import gaussian_filter
 from ops.image_ops_impl import custom_ssim
+import cv2
 
 
 def sliding_window(image, Overlap, BatchSize):
@@ -35,7 +36,7 @@ class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1,
                  batch_size=None, train_gammas=True, train_musx=True, use_diff_center=False, radial_as=False, use_determinant=False,
                  normalize_pis=True, quantization_mode=0, bit_depths=None, quantize_pis=False, lower_bounds=None,
-                 upper_bounds=None, use_yuv=True, only_y_gamma=False, ssim_opt=False, precision=8, add_kernel_slots=0, iter_offset=0, margin=0.5, overlap_of_batches=0):
+                 upper_bounds=None, use_yuv=True, only_y_gamma=False, ssim_opt=False, precision=8, add_kernel_slots=0, iter_offset=0, margin=0.5, overlap_of_batches=0, kernel_count_as_norm_l1=False, train_svs=False):
         self.batch_shape = None
         self.use_yuv = use_yuv
         self.only_y_gamma = only_y_gamma
@@ -44,6 +45,7 @@ class Smoe:
         self.precision = precision
         self.train_mask = None
         self.add_kernel_slots = add_kernel_slots
+        self.kernel_count_as_norm_l1 = kernel_count_as_norm_l1
 
         # init params
         self.pis_init = None
@@ -149,6 +151,7 @@ class Smoe:
         self.best_mse = []
         self.best_qmse = []
         self.num_pis = []
+        self.num_svs = []
 
         self.iter = iter_offset
         self.valid = False
@@ -169,6 +172,7 @@ class Smoe:
         self.quantize_pis = quantize_pis
         self.lower_bounds = lower_bounds
         self.upper_bounds = upper_bounds
+        self.with_SV = train_svs
 
         # generate initializations
         self.start_batches = start_batches  # start_batches corresponds to desired batch numbers
@@ -302,6 +306,32 @@ class Smoe:
         self.stack_orig = tf.constant([1.], dtype=tf.float32)
         self.insert_pos = tf.placeholder(tf.int32)
 
+        if self.with_SV:
+            '''
+            #self.SV_var = tf.Variable(np.zeros((np.prod(self.joint_domain.shape[0:-1]), 1)), dtype=tf.float32)
+            #self.SV_var = tf.Variable(np.zeros((np.prod(np.array(self.image.shape[0:-1]) + self.overlap), 1)), dtype=tf.float32)
+            self.SV_var = tf.Variable(np.zeros((np.prod(np.array(self.image.shape[0:-1]) + self.overlap), num_of_all_kernels)),
+                                      dtype=tf.float32)
+            self.bw_SV = tf.Variable(-34 / 2 * 50 / 32 * np.sqrt(np.prod(self.joint_domain.shape[0:-1])), trainable=True, dtype=tf.float32)
+    
+            '''
+            gamma_init = np.sqrt(34 / 2 * 50 / 32 * np.sqrt(np.prod(self.joint_domain.shape[0:-1])))
+
+            #A_prototype = np.zeros((2, 2))
+            #np.fill_diagonal(A_prototype, gamma_init)
+            #self.bw_SV = tf.Variable(A_prototype, dtype=tf.float32)
+            #A_SV = tf.tile(tf.expand_dims(self.bw_SV, axis=0), (np.prod(self.joint_domain.shape[0:-1]), 1, 1))
+
+            #self.SV_var = tf.Variable(np.zeros((np.prod(self.joint_domain.shape[0:-1]), 1)), dtype=tf.float32)
+            self.SV_var = tf.Variable(np.zeros((np.prod(np.array(self.image.shape[0:-1]) + 2*self.overlap), 1)),
+                                      dtype=tf.float32)
+
+            A_prototype = np.zeros((2, 2))
+            np.fill_diagonal(A_prototype, gamma_init)
+            A_init_SV = np.tile(A_prototype, (np.prod(self.joint_domain.shape[0:-1]), 1, 1))
+            self.bw_diag_SV = tf.Variable(A_init_SV, dtype=tf.float32)
+            self.bw_corr_SV = tf.Variable(np.zeros_like(A_init_SV), dtype=tf.float32)
+
 
         if self.radial_as:
             if A_init.ndim == 1:
@@ -327,6 +357,9 @@ class Smoe:
             pis_assign = self.pis_var[self.insert_pos:self.insert_pos + self.num_inc_kernels].assign(self.pis_inc_var)
 
             self.assign_inc_vars_op = tf.group(nue_e_assign, gamma_e_assign, musX_assign, A_diagonal_assign, A_corr_assign, pis_assign)
+
+            if self.with_SV:
+                self.assign_sv_zero = self.SV_var.assign(np.zeros((np.prod(np.array(self.image.shape[0:-1]) + 2*self.overlap), 1)))
 
             # concat and give them name like VAR_concat and then quantize!
             concat_musX, concat_nu_e, concat_gamma_e, concat_A_diagonal, concat_A_corr, concat_pis = \
@@ -423,6 +456,31 @@ class Smoe:
 
         self.kernel_list = tf.placeholder(shape=(None,), dtype=tf.bool)
 
+        if self.with_SV:
+            self.mask_of_sv_in_batch = tf.placeholder(shape=(None,), dtype=tf.bool)
+            '''
+            dist = tf.reduce_sum(tf.square(self.domain_op), 1)
+            dist = tf.reshape(dist, [-1, 1])
+            sq_dists = tf.add(tf.subtract(dist, tf.multiply(2., tf.matmul(self.domain_op, tf.transpose(self.domain_op)))),
+                              tf.transpose(dist))
+            my_kernel = tf.exp(tf.multiply(self.bw_SV, tf.abs(sq_dists)))
+            '''
+            domain_exp_sv = self.domain_op
+            domain_exp_sv = tf.tile(tf.expand_dims(domain_exp_sv, axis=0), (tf.shape(self.domain_op)[0], 1, 1))
+            x_sub_mu_sv = tf.expand_dims(domain_exp_sv - tf.expand_dims(self.domain_op, axis=1), axis=-1)
+            A_SV = tf.linalg.band_part(self.bw_diag_SV, 0, 0) \
+                + tf.linalg.band_part(tf.linalg.set_diag(self.bw_corr_SV, np.zeros((np.prod(self.joint_domain.shape[0:-1]), self.dim_domain))), -1, 0)
+            A_SV = tf.boolean_mask(A_SV, self.mask_of_sv_in_batch)
+            my_kernel = tf.exp(-1.0 * einsum('abli,alm,anm,abnj->ab', x_sub_mu_sv, A_SV, A_SV, x_sub_mu_sv))
+
+
+            SV = tf.boolean_mask(self.SV_var, self.mask_of_sv_in_batch)
+            self.threshold_sv = tf.placeholder_with_default(tf.constant(0.0), shape=None)
+            SV_bool = tf.greater_equal(tf.abs(SV), self.threshold_sv)
+            SV = SV * tf.cast(SV_bool, dtype=tf.float32)
+        #res_sv = tf.matmul(tf.transpose(SV), my_kernel)
+        #res_sv_tiled = tf.tile(res_sv, (3, 1)) * [[1], [0], [0]]
+
 
         if self.radial_as:
            #A_mask = np.zeros((self.dim_domain, self.dim_domain))
@@ -501,7 +559,6 @@ class Smoe:
         self.w_e_op = self.w_e_op * bool_mask_infl
 
         kernel_list_batch_op = tf.reduce_sum(bool_mask_infl, axis=1) > 0 # 10 ** -9
-        self.batch_size_op = tf.placeholder(shape=None, dtype=tf.int32)
         self.w_e_max_op = tf.reshape(tf.argmax(tf.boolean_mask(self.w_e_op, kernel_list_batch_op), axis=0),
                                      self.batch_size)
         self.indices = tf.boolean_mask(self.indices, kernel_list_batch_op)
@@ -518,6 +575,13 @@ class Smoe:
         else:
             self.res = tf.reduce_sum(self.w_e_op * nu_e, axis=1)
 
+        if self.with_SV:
+            SV = tf.transpose(SV)
+            #SV = tf.boolean_mask(SV, bool_mask)
+            res_sv = tf.matmul(SV, my_kernel)
+            #res_sv = tf.reduce_sum(self.w_e_op * res_sv, axis=0, keepdims=True)
+            res_sv_tiled = tf.tile(res_sv, (3, 1)) * [[1], [0], [0]]
+            self.res = self.res + res_sv_tiled
         self.res = tf.clip_by_value(self.res, 0, 1)
         self.res = tf.transpose(self.res)
 
@@ -546,11 +610,21 @@ class Smoe:
         self.sampl_prob = err_map / tf.reduce_sum(err_map)
 
         if self.overlap > 0:
+            '''
+            valued_array = np.ones(self.batch_size, dtype=np.bool)
+            valued_array[self.overlap:-self.overlap, self.overlap:-self.overlap] = False
+            valued_bool = tf.constant(valued_array, dtype=tf.bool )
+            valued_bool = tf.reshape(valued_bool, [-1,])
+            diff = diff * tf.expand_dims(tf.cast(valued_bool, dtype=tf.float32), axis=-1)
+
+            '''
             diff = tf.reshape(diff, self.batch_size + (num_channels,))
             if self.dim_domain == 2:
                 diff = diff[self.overlap:-self.overlap, self.overlap:-self.overlap, :]
             elif self.dim_domain == 3:
                 diff = diff[self.overlap:-self.overlap, self.overlap:-self.overlap, self.overlap:-self.overlap, :]
+            diff = tf.reshape(diff, [-1, num_channels])
+
 
         squared_diff = tf.square(diff)
         mse = tf.reduce_mean(squared_diff)
@@ -639,10 +713,30 @@ class Smoe:
                 loss_pixel = 1 - ssim
 
         self.num_pi_op = tf.count_nonzero(pis_mask)
+        if self.with_SV:
+            self.num_sv_op = tf.count_nonzero(tf.abs(self.SV_var) > 5*10**-3)
+        else:
+            self.num_sv_op = tf.count_nonzero(0.0)
 
         self.pis_l1 = tf.placeholder(tf.float32)
         self.u_l1 = tf.placeholder(tf.float32)
-        pis_l1 = self.pis_l1 * tf.reduce_sum(pis) / self.start_pis
+        self.sv_l1_sub_l2 = tf.placeholder(tf.float32)
+
+        if self.kernel_count_as_norm_l1:
+            pis_l1_norm = tf.cast(self.num_pi_op, dtype=tf.float32)
+        else:
+            pis_l1_norm = self.start_pis
+
+        pis_l1 = self.pis_l1 * tf.reduce_sum(pis) / pis_l1_norm
+
+        if self.with_SV:
+            P1 = tf.reduce_sum(tf.abs(SV))
+            P2 = tf.sqrt(tf.nn.l2_loss(SV) * 2.0 + 10 ** -9)
+            P = P1 - P2
+            SV_l1_sub_l2 = self.sv_l1_sub_l2 * 10 ** -1 * P / np.prod(self.batch_size_valued)  #tf.cast(tf.shape(SV)[0], dtype=tf.float32) # mse
+            #SV_l1 = 0.08 * 10 ** -2 * P  # ssim
+        else:
+            SV_l1_sub_l2 = 0.0
 
         # TODO work in progess
         #rxx_det = 1/tf.reduce_prod(tf.matrix_diag_part(A), axis=-1)**2
@@ -653,12 +747,21 @@ class Smoe:
         u_l1 = self.u_l1 * tf.reduce_sum(tf.linalg.diag_part(A)) # * (tf.cast(self.num_pi_op, tf.float32) / self.start_pis)
         #'''
 
-        self.loss_op = loss_pixel + pis_l1 + u_l1
+        #tf.log(   tf.linalg.det(einsum('alm,anm->aln', A_SV, A_SV)))
+
+        #kl_div = 10**-3 * tf.reduce_sum(tf.log(tf.linalg.det(einsum('alm,anm->aln', A_SV, A_SV))) - tf.linalg.trace( tf.linalg.inv( einsum('alm,anm->aln', A_SV, A_SV) +  10**-2*tf.eye(2, batch_shape=[tf.shape(A_SV)[0]])  ) -  tf.eye(2, batch_shape=[tf.shape(A_SV)[0]])))
+
+        self.loss_op = loss_pixel + pis_l1 + u_l1 + SV_l1_sub_l2
 
         self.mse_op = mse * ((2**self.precision) ** 2)
 
         #self.res = tf.reshape(self.res, self.batch_shape[:-1] + (num_channels,))
         self.res = tf.reshape(self.res, self.batch_size + (num_channels,))
+        if self.with_SV:
+            self.res_sv = tf.reshape(res_sv, self.batch_size)
+        else:
+            self.res_sv = tf.constant(0.0)
+
 
         init_new_vars_op = tf.global_variables_initializer()
         self.session.run(init_new_vars_op)
@@ -676,7 +779,7 @@ class Smoe:
         self.save_op.restore(self.session, path)
         print("Model restored from file: %s" % path)
 
-    def set_optimizer(self, optimizer1, optimizer2=None, optimizer3=None, grad_clip_value_abs=None):
+    def set_optimizer(self, optimizer1, optimizer2=None, optimizer3=None, optimizer4=None, grad_clip_value_abs=None):
         self.optimizer1 = optimizer1
 
         if optimizer2 is None:
@@ -689,35 +792,85 @@ class Smoe:
         else:
             self.optimizer3 = optimizer3
 
+        if optimizer4 is None:
+            self.optimizer4 = optimizer1
+        else:
+            self.optimizer4 = optimizer4
+
         var_opt1 = [self.nu_e_var, self.gamma_e_var, self.musX_var]
         var_opt2 = [self.pis_var]
         var_opt3 = [self.A_diagonal_var, self.A_corr_var]
+        if self.with_SV:
+            var_opt4 = [self.SV_var, self.bw_diag_SV, self.bw_corr_SV]
+        else:
+            var_opt4 = []
 
         # sort out not trainable vars
         self.var_opt1 = [var for var in var_opt1 if var in tf.trainable_variables()]
         self.var_opt2 = [var for var in var_opt2 if var in tf.trainable_variables()]
         self.var_opt3 = [var for var in var_opt3 if var in tf.trainable_variables()]
+        if self.with_SV:
+            self.var_opt4 = [var for var in var_opt4 if var in tf.trainable_variables()]
 
+        variables = []
+        if not optimizer1._lr == 0:
+            variables += self.var_opt1
+            len1 = len(self.var_opt1)
+        else:
+            len1 = 0
+        if not optimizer2._lr == 0:
+            variables += self.var_opt2
+            len2 = len(self.var_opt2)
+        else:
+            len2 = 0
+        if not optimizer3._lr == 0:
+            variables += self.var_opt3
+            len3 = len(self.var_opt3)
+        else:
+            len3 = 0
+        if not optimizer4._lr == 0:
+            variables += self.var_opt4
+            len4 = len(self.var_opt4)
+        else:
+            len4 = 0
         accum_gradients = [tf.Variable(tf.zeros_like(var.initialized_value()), trainable=False)
-                           for var in self.var_opt1 + self.var_opt2 + self.var_opt3]
+                           for var in variables]
         self.zero_op = [grad.assign(tf.zeros_like(grad)) for grad in accum_gradients]
-        gradients = tf.gradients(self.loss_op, self.var_opt1 + self.var_opt2 + self.var_opt3)
+        gradients = tf.gradients(self.loss_op, variables)
         self.accum_ops = [accum_gradients[i].assign_add(gv) for i, gv in enumerate(gradients)]
 
         if grad_clip_value_abs is not None:
             accum_gradients = [tf.clip_by_value(g, -grad_clip_value_abs, grad_clip_value_abs) for g in accum_gradients]
 
+        '''
         gradients1 = accum_gradients[:len(self.var_opt1)]
         gradients2 = accum_gradients[len(self.var_opt1):len(self.var_opt1) + len(self.var_opt2)]
-        gradients3 = accum_gradients[len(self.var_opt1) + len(self.var_opt2):]
+        gradients3 = accum_gradients[len(self.var_opt1) + len(self.var_opt2):len(self.var_opt1) + len(self.var_opt2) + len(self.var_opt3)]
+        gradients4 = accum_gradients[len(self.var_opt1) + len(self.var_opt2) + len(self.var_opt3):]
+        '''
 
-        train_op1 = self.optimizer1.apply_gradients(zip(gradients1, self.var_opt1))
-        if len(var_opt2) > 0:
+        gradients1 = [accum_gradients.pop(0) for g in range(len1)]
+        gradients2 = [accum_gradients.pop(0) for g in range(len2)]
+        gradients3 = [accum_gradients.pop(0) for g in range(len3)]
+        gradients4 = [accum_gradients.pop(0) for g in range(len4)]
+
+        if len1 > 0:
+            train_op1 = self.optimizer1.apply_gradients(zip(gradients1, self.var_opt1))
+        else:
+            train_op1 = tf.no_op()
+        if len2 > 0:
             train_op2 = self.optimizer2.apply_gradients(zip(gradients2, self.var_opt2))
         else:
             train_op2 = tf.no_op()
-        train_op3 = self.optimizer3.apply_gradients(zip(gradients3, self.var_opt3))
-        self.train_op = tf.group(train_op1, train_op2, train_op3)
+        if len3 > 0:
+            train_op3 = self.optimizer3.apply_gradients(zip(gradients3, self.var_opt3))
+        else:
+            train_op3 = tf.no_op()
+        if len4 > 0:
+            train_op4 = self.optimizer4.apply_gradients(zip(gradients4, self.var_opt4))
+        else:
+            train_op4 = tf.no_op()
+        self.train_op = tf.group(train_op1, train_op2, train_op3, train_op4)
 
         uninitialized_vars = []
         for var in tf.global_variables():
@@ -845,11 +998,12 @@ class Smoe:
         else:
             weights = [1, 1, 1]
 
-        if self.ssim_opt:
+        if True: #self.ssim_opt:
             diff = np.average(1 - compare_ssim(self.image, rec, data_range=1, multichannel=True, full=True)[1], axis=-1, weights=weights)
         else:
             diff = np.average(np.power(255 * (self.image - rec), 2), axis=-1, weights=weights)
 
+        '''
         reverse = None
         for i in range(1, max_iters):
             if reverse:
@@ -870,13 +1024,39 @@ class Smoe:
             if peaks.shape[0] < self.num_inc_kernels:
                 break
             sigma = i
+        
 
         blurred = gaussian_filter(diff, sigma)
-        peaks = peak_local_max(blurred, num_peaks=self.num_inc_kernels)
         blurred_mean = np.mean(blurred)
         blurred_median = np.median(blurred)
+        peaks = peak_local_max(blurred, num_peaks=self.num_inc_kernels)
+        
+
 
         a = 1 / (sigma / self.image.shape[0]) * 2/1
+        '''
+
+        #diff[128, 128] = 20
+
+        blurred = diff
+        blurred_mean = np.mean(blurred)
+        blurred_median = np.median(blurred)
+        blurred_max = np.max(blurred)
+        min_distance_peaks = 8
+
+        '''
+        blurred[0,0] = 20
+        blurred_max = np.max(blurred)
+        '''
+
+
+        #peaks = peak_local_max(blurred, num_peaks=self.num_inc_kernels, min_distance=min_distance_peaks, threshold_abs=0.5 * blurred_max)
+        _, used = zip(*self.get_num_pis())
+        used = used[-1]
+        num_new_kernels = self.start_pis - used
+        peaks = peak_local_max(blurred, num_peaks=num_new_kernels, min_distance=min_distance_peaks)
+        # peaks = peak_local_max(blurred, num_peaks=self.num_inc_kernels)
+        a = 16 * self.image.shape[0] / min_distance_peaks
 
         if plot_dir:
             if not os.path.exists(plot_dir):
@@ -907,29 +1087,60 @@ class Smoe:
         # blurred = cv2.GaussianBlur(np.abs(self.image - rec), (0, 0), 5, 5)
         # peaks = peak_local_max(blurred, num_peaks=self.num_inc_kernels)
         peaks, a = self.calc_peaks_inc(threshold_rel=threshold_rel, plot_dir=plot_dir)
-        musX_inc = peaks / self.image.shape[0:-1]
+        musX_inc = np.zeros_like(self.musX_init)
+        #center_peaks = peaks / self.image.shape[0:-1]
+        center_peaks = self.joint_domain[peaks[:, 0], peaks[:, 1], :self.dim_domain]
+        musX_inc[:len(center_peaks)] = center_peaks
         curr_pis = self.get_params()['pis']
         pi_mean = np.mean(curr_pis[curr_pis > 0])
         pi_median = np.median(curr_pis[curr_pis > 0])
         #pis_inc = np.ones_like(self.pis_init) * pi_mean
-        pis_inc = np.ones_like(self.pis_init) * pi_median
+        pis_inc = np.zeros_like(self.pis_init)
+        pis_inc[:len(center_peaks)] = pi_median
         # pis_inc = self.pis_init
         gamma_e_inc = np.zeros_like(self.gamma_e_init)
-        nu_e_inc = np.ones_like(self.nu_e_init) * 0.5
+        nu_e_inc = np.zeros_like(self.nu_e_init)
+        nu_e_inc[:len(center_peaks)] = self.joint_domain[peaks[:, 0], peaks[:, 1], self.dim_domain:]
 
         A_diagonal_inc = np.zeros_like(self.A_init)
         A_corr_inc = np.zeros_like(self.A_init)
         # a = 2 * (self.kernel_count + 1)
-        A_diagonal_inc[:, 0, 0] = a
-        A_diagonal_inc[:, 1, 1] = a
+        A_diagonal_inc[:len(center_peaks), 0, 0] = a
+        A_diagonal_inc[:len(center_peaks), 1, 1] = a
         if self.radial_as:
-            A_diagonal_inc = A_diagonal_inc[:, 0, 0]
+            A_diagonal_inc = A_diagonal_inc[:len(center_peaks), 0, 0]
 
         # fig = plt.figure()
         # plt.imshow(blurred, vmin=-1, vmax=1, cmap='gray')
         # plt.scatter(peaks[:, 1], peaks[:, 0])
         # plt.savefig("inc_{}.png".format(self.iter))
         # plt.close(fig)
+        '''
+        SVs, BW_diag, BW_corr = self.session.run([self.SV_var, self.bw_diag_SV, self.bw_corr_SV])
+        if self.overlap > 0 :
+            shape = tuple(np.array(self.image.shape[0:-1]) + 2*self.overlap)
+            SVs = np.reshape(SVs, shape)[self.overlap:-self.overlap, self.overlap:-self.overlap]
+            SVs = np.reshape(SVs, [-1, ])
+        idx = np.squeeze(np.argsort(np.abs(SVs), axis=0))
+        domain = np.reshape(self.joint_domain[:, :, :self.dim_domain], [-1, self.dim_domain])[idx]
+        SVs = SVs[idx]
+        np.sort(SVs)
+        BW_diag = BW_diag[idx]
+        BW_corr = BW_corr[idx]
+
+        nu_es = np.reshape(self.reconstruction_image, [-1, 3])[idx, 0]
+
+
+        musX_inc = np.zeros_like(self.musX_init)
+        musX_inc[:self.musX_init.shape[0], :] = domain[:self.musX_init.shape[0], :]
+        A_corr_inc = np.zeros_like(self.A_init)
+        A_corr_inc[:self.musX_init.shape[0]] = BW_corr[:self.musX_init.shape[0]]
+        A_diagonal_inc = np.zeros_like(self.A_init)
+        A_diagonal_inc[:self.musX_init.shape[0]] = BW_diag[:self.musX_init.shape[0]]
+        nu_e_inc = np.ones_like(self.nu_e_init) * 0.5
+        nu_e_inc[:self.musX_init.shape[0], 0] = nu_es[:self.musX_init.shape[0]]
+        '''
+
 
         self.session.run(self.reinit_inc_vars_op, feed_dict={self.nu_e_inc_new: nu_e_inc, self.musX_inc_new: musX_inc,
                                                              self.pis_inc_new: pis_inc,
@@ -946,13 +1157,13 @@ class Smoe:
         self.kernel_list_per_batch = [np.ones((self.add_kernel_slots + 2*self.start_pis,), dtype=bool)] * self.start_batches
 
     def apply_inc(self):
-        self.session.run([self.assign_inc_opt_vars_op], feed_dict={self.insert_pos: self.kernel_count})
+        #self.session.run([self.assign_inc_opt_vars_op], feed_dict={self.insert_pos: self.kernel_count})
         self.session.run([self.assign_inc_vars_op], feed_dict={self.insert_pos: self.kernel_count})
         self.session.run(self.reset_optimizers_op)
         self.kernel_count += self.num_inc_kernels
 
     def train(self, num_iter, val_iter=100, ukl_iter=None, optimizer1=None, optimizer2=None, optimizer3=None, grad_clip_value_abs=None, pis_l1=0,
-              u_l1=0, sampling_percentage=100, callbacks=(), with_inc=False, train_inc=False, train_orig=True):
+              u_l1=0, sv_l1_sub_l2=0, sampling_percentage=100, callbacks=(), with_inc=False, train_inc=False, train_orig=True):
         if ukl_iter == None:
             ukl_iter = val_iter
 
@@ -968,18 +1179,20 @@ class Smoe:
             self.qparams = quantize_params(self, self.get_params())
         if self.quantization_mode == 1:
             self.rparams = rescaler(self, self.qparams)
-            self.best_qloss, self.best_qmse, _ = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=False, update_reconstruction=True,
+            self.best_qloss, self.best_qmse, _ = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, sv_l1_sub_l2=sv_l1_sub_l2, train=False, update_reconstruction=True,
                                        with_quantized_params=True, with_inc=with_inc, train_inc=False)
             self.qlosses.append((0, self.best_qloss))
             self.qmses.append((0, self.best_qmse))
 
-        self.best_loss, self.best_mse, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=False,
-                                                                 update_reconstruction=True, with_inc=with_inc, train_inc=False)
+        self.best_loss, self.best_mse, num_pi, num_sv = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, sv_l1_sub_l2=sv_l1_sub_l2, train=False,
+                                                                         update_reconstruction=True, with_inc=with_inc,
+                                                                         train_inc=False)
 
 
         self.losses.append((self.iter, self.best_loss))
         self.mses.append((self.iter, self.best_mse))
         self.num_pis.append((self.iter, num_pi))
+        self.num_svs.append((self.iter, num_sv))
 
         # run callbacks
         for callback in callbacks:
@@ -991,7 +1204,7 @@ class Smoe:
                 validate = i % val_iter == 0
                 update_kernel_list = i % ukl_iter == 0
 
-                loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=train_orig,
+                loss_val, mse_val, num_pi, num_sv = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, sv_l1_sub_l2=sv_l1_sub_l2, train=train_orig,
                                                              update_reconstruction=False, sampling_percentage=sampling_percentage,
                                                              with_inc=with_inc, train_inc=train_inc)
 
@@ -1003,12 +1216,26 @@ class Smoe:
                         self.qparams = quantize_params(self, self.get_params())
                     if self.quantization_mode == 1:
                         self.rparams = rescaler(self, self.qparams)
-                        qloss_val, qmse_val, _ = self.run_batched(pis_l1=pis_l1,
-                                                                  u_l1=u_l1, train=False, update_reconstruction=True,
+                        qloss_val, qmse_val, _, _ = self.run_batched(pis_l1=pis_l1,
+                                                                  u_l1=u_l1, sv_l1_sub_l2=sv_l1_sub_l2, train=False, update_reconstruction=True,
                                                                   with_quantized_params=True, with_inc=with_inc, train_inc=False)
-                    loss_val, mse_val, num_pi = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=False,
-                                                                 update_reconstruction=True, with_inc=with_inc, train_inc=False)
+
+
+                    '''
+                    ### HACK um Threshold Zeugs schnell zu kontrollieren! ###
+                    _, mse_0, _, _ = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, sv_l1_sub_l2=sv_l1_sub_l2, train=False,
+                                                                         update_reconstruction=True, with_inc=with_inc,
+                                                                         train_inc=False, thr_sv=0)
+                    _, mse_inf, _, _ = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, sv_l1_sub_l2=sv_l1_sub_l2, train=False,
+                                                      update_reconstruction=True, with_inc=with_inc,
+                                                      train_inc=False, thr_sv=1.0*10**6)
+                    '''
+                    loss_val, mse_val, num_pi, num_sv = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=False,
+                                                                 update_reconstruction=True, with_inc=with_inc, train_inc=False, thr_sv=5*10**-3)
+
                     # run batched with quant params
+                    #print('PSNR_0 = {0:.2f},  PSNR_5 = {1:.2f},  PSNR_INF = {2:.2f}'.format(10*np.log10(255**2/mse_0), 10*np.log10(255**2/mse_val), 10*np.log10(255**2/mse_inf)))
+                    ######
 
                 # TODO take loss_history into account
                 if np.isnan(loss_val) or (len(self.losses) > 0 and loss_val + 1 > (
@@ -1036,6 +1263,7 @@ class Smoe:
                         self.qlosses.append((i, qloss_val))
 
                     self.num_pis.append((self.iter, num_pi))
+                    self.num_svs.append((self.iter, num_sv))
 
                     # run callbacks
                     for callback in callbacks:
@@ -1051,7 +1279,7 @@ class Smoe:
         print("best loss/mse: ", self.best_loss, "/", self.best_mse)
 
 
-    def run_batched(self, pis_l1=0, u_l1=0, train=True, update_reconstruction=False, with_quantized_params=False, sampling_percentage=100, with_inc=False, train_inc=False):
+    def run_batched(self, pis_l1=0, u_l1=0, sv_l1_sub_l2=0, train=True, update_reconstruction=False, with_quantized_params=False, sampling_percentage=100, with_inc=False, train_inc=False, thr_sv=None):
 
         self.valid = False
         if with_quantized_params:
@@ -1071,6 +1299,7 @@ class Smoe:
 
         # only for update update_reconstruction=True
         reconstruction_ = np.zeros_like(self.image)
+        reconstruction_sv = np.zeros(self.image.shape[0:-1])
         w_e_ = np.zeros(self.image.shape[0:-1])
         if self.add_kernel_slots > 0:
             num_all_kernels = 2 * self.start_pis + self.add_kernel_slots
@@ -1078,22 +1307,27 @@ class Smoe:
             num_all_kernels = self.start_pis
         w_matrix = np.zeros((num_all_kernels,) + self.image.shape[:-1])
 
-        widgets = [
-            progressbar.AnimatedMarker(markers='◐◓◑◒'),
-            ' Iteration: {0}  '.format(self.iter),
-            ' ', progressbar.Counter('%(value)d/{0}'.format(self.start_batches)),
-            ' ', progressbar.Timer(),
-        ]
-        bar = progressbar.ProgressBar(widgets=widgets)
+        #widgets = [
+        #    progressbar.AnimatedMarker(markers='◐◓◑◒'),
+        #    ' Iteration: {0}  '.format(self.iter),
+        #    ' ', progressbar.Counter('%(value)d/{0}'.format(self.start_batches)),
+        #    ' ', progressbar.Timer(),
+        #]
+        #bar = progressbar.ProgressBar(widgets=widgets)
 
         ii = -1
-        for (coord, batch) in bar(sliding_window(self.joint_domain, self.overlap, self.batch_size_valued)):
+        #for (coord, batch) in bar(sliding_window(self.joint_domain, self.overlap, self.batch_size_valued)):
+        for (coord, batch) in sliding_window(self.joint_domain, self.overlap, self.batch_size_valued):    
             ii = ii + 1
-            retrieve = [self.loss_op, self.mse_op, self.num_pi_op]
+            retrieve = [self.loss_op, self.mse_op, self.num_pi_op, self.num_sv_op]
             if not with_quantized_params:
                 retrieve.append(self.indices)
 
             img_patch = batch.reshape(-1, batch.shape[-1])
+            bool_mask_sv = np.zeros(self.image.shape[0:-1], dtype=np.bool)
+            bool_mask_sv = np.pad(bool_mask_sv, ((self.overlap, self.overlap), (self.overlap, self.overlap)), 'constant', constant_values=False)
+            bool_mask_sv[coord[0] + self.overlap:batch.shape[0] + coord[0] + self.overlap, coord[1] + self.overlap:batch.shape[1] + coord[1] + self.overlap] = True
+            bool_mask_sv = bool_mask_sv.reshape(-1,)
 
             if train and self.dim_domain >= 4:
                 img_patch = img_patch[self.train_mask]
@@ -1103,13 +1337,19 @@ class Smoe:
                 samples = np.random.choice(img_patch.shape[0], (num_samples,), replace=False, p=self.random_sampling_per_batch[ii])
                 img_patch = img_patch[samples, :]
 
+
+
             feed_dict = {self.joint_domain_batched_op: img_patch, self.pis_l1: pis_l1, self.u_l1: u_l1,
-                         self.kernel_list: self.kernel_list_per_batch[ii], self.stack_inc: [1.] if with_inc else [0.],
-                         self.stack_orig: [1.]}
+                         self.kernel_list: self.kernel_list_per_batch[ii], self.stack_inc: [1.] if with_inc else [0.], self.stack_orig: [1.]}
+            if self.with_SV:
+                feed_dict.update({self.mask_of_sv_in_batch: bool_mask_sv, self.sv_l1_sub_l2: sv_l1_sub_l2})
+                if thr_sv is not None:
+                    feed_dict.update({self.threshold_sv: thr_sv})
+
             if train:
                 retrieve.append(self.accum_ops)
             if update_reconstruction:
-                retrieve += [self.res, self.w_e_max_op]
+                retrieve += [self.res, self.w_e_max_op, self.res_sv]
                 if with_quantized_params:
                     feed_dict.update({self.A: self.rparams["A"], self.musX: self.rparams["musX"], self.nu_e: self.rparams["nu_e"], self.gamma_e: self.rparams["gamma_e"], self.pis: self.rparams["pis"]})
 
@@ -1123,15 +1363,16 @@ class Smoe:
             results = self.session.run(retrieve, feed_dict=feed_dict)
             if update_reconstruction:
                 if train:
-                    rec_batch = results[5]
-                    w_e_batch = results[3][results[6]]
+                    rec_batch = results[6]
+                    w_e_batch = results[4][results[7]]
                 else:
                     if with_quantized_params:
-                        rec_batch = results[3]
-                        w_e_batch = results[3][results[4]]
-                    else:
                         rec_batch = results[4]
-                        w_e_batch = results[3][results[5]]
+                        w_e_batch = results[4][results[5]]
+                    else:
+                        rec_batch = results[5]
+                        w_e_batch = results[4][results[6]]
+                        rec_sv_batch = results[7]
 
                 start_y = coord[0] + self.overlap
                 start_x = coord[1] + self.overlap
@@ -1141,6 +1382,10 @@ class Smoe:
                     reconstruction_[start_y:end_y, start_x:end_x, :] \
                         = rec_batch[self.overlap:self.overlap + self.batch_size_valued[0],
                           self.overlap:self.overlap + self.batch_size_valued[1], :]
+                    if self.with_SV:
+                        reconstruction_sv[start_y:end_y, start_x:end_x] \
+                            = rec_sv_batch[self.overlap:self.overlap + self.batch_size_valued[0],
+                              self.overlap:self.overlap + self.batch_size_valued[1]]
                     w_e_[start_y:end_y, start_x:end_x] \
                         = w_e_batch[self.overlap:self.overlap + self.batch_size_valued[0],
                           self.overlap:self.overlap + self.batch_size_valued[1]]
@@ -1159,11 +1404,11 @@ class Smoe:
 
             if update_reconstruction:
                 if self.dim_domain == 2:
-                    w_matrix[results[3], start_y:end_y, start_x:end_x] = results[-2][:,
+                    w_matrix[results[4], start_y:end_y, start_x:end_x] = results[-2][:,
                                 self.overlap:self.overlap + self.batch_size_valued[0],
                                 self.overlap:self.overlap + self.batch_size_valued[1]]
                 elif self.dim_domain == 3:
-                    w_matrix[results[3], start_y:end_y, start_x:end_x, start_z:end_z] = results[-2][:,
+                    w_matrix[results[4], start_y:end_y, start_x:end_x, start_z:end_z] = results[-2][:,
                                                 self.overlap:self.overlap + self.batch_size_valued[0],
                                                 self.overlap:self.overlap + self.batch_size_valued[1],
                                                 self.overlap:self.overlap + self.batch_size_valued[2]]
@@ -1172,9 +1417,10 @@ class Smoe:
             mse_val += results[1] * np.prod(self.batch_size_valued) / self.num_pixel
 
             num_pi = results[2]
+            num_sv = results[3]
             if not with_quantized_params:
                 bool_mask = np.zeros_like(self.kernel_list_per_batch[ii])
-                bool_mask[results[3]] = True
+                bool_mask[results[4]] = True
                 self.kernel_list_per_batch[ii] = bool_mask
 
             if update_reconstruction:
@@ -1183,6 +1429,7 @@ class Smoe:
         if update_reconstruction:
             if not with_quantized_params:
                 self.reconstruction_image = reconstruction_
+                self.reconstruction_sv = reconstruction_sv
                 self.weight_matrix_argmax = w_e_
 
                 self.weight_matrix = w_matrix
@@ -1199,7 +1446,7 @@ class Smoe:
             self.session.run(self.train_inc_op)
 
 
-        return loss_val, mse_val, num_pi
+        return loss_val, mse_val, num_pi, num_sv
 
     def get_params(self):
         pis, musX, A_diagonal, A_corr, gamma_e, nu_e = self.session.run([self.qpis, self.qmusX,
@@ -1267,6 +1514,9 @@ class Smoe:
 
     def get_num_pis(self):
         return self.num_pis
+
+    def get_num_svs(self):
+        return self.num_svs
 
     def get_original_image(self):
         return np.squeeze(self.image)

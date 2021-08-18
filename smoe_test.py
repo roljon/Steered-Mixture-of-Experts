@@ -16,10 +16,10 @@ from logger import ModelLogger
 from utils import save_model, load_params, read_image
 
 
-def main(image_path, results_path, iterations, iterations_inc, inc_steps, threshold_rel, validation_iterations, kernels_per_dim, params_file, l1reg, base_lr,
-         batches, batch_size, checkpoint_path, lr_div, lr_mult, disable_train_pis, disable_train_gammas, disable_train_musx,
+def main(image_path, results_path, iterations, iterations_inc, iterations_all, inc_steps, threshold_rel, validation_iterations, kernels_per_dim, params_file, l1reg, base_lr,
+         batches, batch_size, checkpoint_path, lr_div, lr_mult, lr_mult_sv, disable_train_pis, disable_train_gammas, disable_train_musx,
          use_diff_center, radial_as, use_determinant, normalize_pis, quantization_mode, bit_depths, quantize_pis, lower_bounds,
-         upper_bounds, use_yuv, only_y_gamma, ssim_opt, sampling_percentage, update_kernel_list_iterations, overlap_of_batches):
+         upper_bounds, use_yuv, only_y_gamma, ssim_opt, sampling_percentage, update_kernel_list_iterations, overlap_of_batches, svreg, hpc_mode, current_inc_step, kernel_count_norm_l1, train_svs):
 
     if len(bit_depths) != 5:
         raise ValueError("Number of bit depths must be five!")
@@ -54,23 +54,30 @@ def main(image_path, results_path, iterations, iterations_inc, inc_steps, thresh
         kernels_per_dim = [kernels_per_dim[0]] * len(orig.shape[:-1])
 
     loss_plotter = LossPlotter(path=results_path + "/loss.png", quiet=True)
-    image_plotter = ImagePlotter(path=results_path, options=['orig', 'reconstruction', 'gating', 'pis_hist'], quiet=True)
+    if train_svs:
+        image_plotter = ImagePlotter(path=results_path, options=['orig', 'reconstruction', 'gating', 'supportvectors', 'pis_hist'], quiet=True)
+    else:
+        image_plotter = ImagePlotter(path=results_path,
+                                     options=['orig', 'reconstruction', 'gating', 'pis_hist'],
+                                     quiet=True)
     logger = ModelLogger(path=results_path, as_media=True)
 
     smoe = Smoe(orig, kernels_per_dim, init_params=init_params, train_pis=not disable_train_pis,
                 train_gammas=not disable_train_gammas, train_musx=not disable_train_musx, use_diff_center=use_diff_center, radial_as=radial_as, start_batches=batches,
                 batch_size=batch_size, use_determinant=use_determinant, normalize_pis=normalize_pis, quantization_mode=quantization_mode,
                 bit_depths=bit_depths, quantize_pis=quantize_pis, lower_bounds=lower_bounds, upper_bounds=upper_bounds,
-                use_yuv=use_yuv, only_y_gamma=only_y_gamma, ssim_opt=ssim_opt, precision=precision, add_kernel_slots=inc_steps*np.prod(kernels_per_dim), overlap_of_batches=overlap_of_batches)
+                use_yuv=use_yuv, only_y_gamma=only_y_gamma, ssim_opt=ssim_opt, precision=precision, add_kernel_slots=inc_steps*np.prod(kernels_per_dim), overlap_of_batches=overlap_of_batches, kernel_count_as_norm_l1=kernel_count_norm_l1, train_svs=train_svs)
 
-
+    if not train_svs:
+        lr_mult_sv = 0
 
     optimizer1 = tf.train.AdamOptimizer(base_lr)
     optimizer2 = tf.train.AdamOptimizer(base_lr/lr_div)
     optimizer3 = tf.train.AdamOptimizer(base_lr*lr_mult)
+    optimizer4 = tf.train.AdamOptimizer(base_lr * lr_mult_sv)
 
     # optimizers have to be set before the restore
-    smoe.set_optimizer(optimizer1, optimizer2, optimizer3)
+    smoe.set_optimizer(optimizer1, optimizer2, optimizer3, optimizer4)
 
     base_lr_inc = base_lr  # *10
     optimizer_inc1 = tf.train.AdamOptimizer(base_lr_inc)
@@ -78,25 +85,61 @@ def main(image_path, results_path, iterations, iterations_inc, inc_steps, thresh
     optimizer_inc3 = tf.train.AdamOptimizer(base_lr_inc * 1000)
     smoe.set_inc_optimizer(optimizer_inc1, optimizer_inc2, optimizer_inc3)
 
-
     if checkpoint_path is not None:
         smoe.restore(checkpoint_path)
 
     if overlap_of_batches > 0:
         sampling_percentage = 100 # otherwise it is not working!
 
-    smoe.train(iterations, val_iter=validation_iterations, pis_l1=l1reg, sampling_percentage=sampling_percentage,
-               callbacks=[loss_plotter.plot, image_plotter.plot, logger.log])
+    if hpc_mode and current_inc_step > 0:
+        #smoe.kernel_count = smoe.session.run(smoe.num_pi_op)
+        smoe.kernel_count += (current_inc_step - 1) * smoe.num_inc_kernels
+        smoe.kernel_list_per_batch = [np.ones((smoe.add_kernel_slots + 2 * smoe.start_pis,),
+                                              dtype=bool)] * smoe.start_batches
 
-    for i in range(inc_steps):
-        print("[{}/{}]".format(i, inc_steps))
-        smoe.reinit_inc(threshold_rel=threshold_rel, plot_dir=results_path)
-        smoe.train(iterations_inc, val_iter=validation_iterations, pis_l1=l1reg,
-                   with_inc=True, train_inc=True, train_orig=False,
+    if iterations != 0:
+        smoe.train(iterations, val_iter=validation_iterations, pis_l1=l1reg, sv_l1_sub_l2=svreg,
+                   sampling_percentage=sampling_percentage,
                    callbacks=[loss_plotter.plot, image_plotter.plot, logger.log])
-        smoe.apply_inc()
-        smoe.train(iterations, val_iter=validation_iterations, pis_l1=l1reg,
-                   callbacks=[loss_plotter.plot, image_plotter.plot, logger.log])
+
+    '''
+    optimizer1 = tf.train.AdamOptimizer(base_lr*0)
+    optimizer2 = tf.train.AdamOptimizer(base_lr / lr_div*0)
+    optimizer3 = tf.train.AdamOptimizer(base_lr * lr_mult*0)
+    optimizer4 = tf.train.AdamOptimizer(base_lr * 10 ** -1)
+
+    # optimizers have to be set before the restore
+    smoe.set_optimizer(optimizer1, optimizer2, optimizer3, optimizer4)
+
+    smoe.train(iterations, val_iter=validation_iterations, pis_l1=l1reg, sv_l1_sub_l2=svreg, sampling_percentage=sampling_percentage,
+               callbacks=[loss_plotter.plot, image_plotter.plot, logger.log])
+    '''
+
+    if hpc_mode and iterations == 0 or not hpc_mode:
+        for i in range(inc_steps):
+            print("[{}/{}]".format(i, inc_steps))
+            smoe.reinit_inc(threshold_rel=threshold_rel, plot_dir=results_path)
+            #smoe.session.run(smoe.assign_sv_zero)
+            #smoe.train(iterations_inc, val_iter=validation_iterations, pis_l1=l1reg, sv_l1_sub_l2=svreg,
+            #           with_inc=True, train_inc=True, train_orig=True,
+            #           callbacks=[loss_plotter.plot, image_plotter.plot, logger.log])
+
+            '''
+            optimizer1 = tf.train.AdamOptimizer(base_lr)
+            optimizer2 = tf.train.AdamOptimizer(base_lr / lr_div)
+            optimizer3 = tf.train.AdamOptimizer(base_lr * lr_mult)
+            optimizer4 = tf.train.AdamOptimizer(base_lr * 0)
+            smoe.set_optimizer(optimizer1, optimizer2, optimizer3, optimizer4)
+            '''
+
+            smoe.apply_inc()
+            smoe.train(iterations_inc, val_iter=validation_iterations, pis_l1=0, sv_l1_sub_l2=svreg,
+                       callbacks=[loss_plotter.plot, image_plotter.plot, logger.log])
+            smoe.train(iterations_all, val_iter=validation_iterations, pis_l1=l1reg, sv_l1_sub_l2=svreg,
+                       callbacks=[loss_plotter.plot, image_plotter.plot, logger.log])
+
+            if hpc_mode:
+                break
 
 
     save_model(smoe, results_path + "/params_best.pkl", best=True, quantize=False if quantization_mode == 0 else True)
@@ -117,6 +160,7 @@ if __name__ == '__main__':
     parser.add_argument('-r', '--results_path', type=str, required=True, help="results path")
     parser.add_argument('-n', '--iterations', type=int, default=10000, help="number of iterations")
     parser.add_argument('-ni', '--iterations_inc', type=int, default=1000, help="number of inc training iterations")
+    parser.add_argument('-na', '--iterations_all', type=int, default=1000, help="number of training iterations after applying")
     parser.add_argument('-is', '--inc_steps', type=int, default=100, help="number of inc training iterations")
     parser.add_argument('-tr', '--threshold_rel', type=float, default=0.2, help="relative threshold for peak calculation")
 
@@ -131,6 +175,7 @@ if __name__ == '__main__':
     parser.add_argument('-c', '--checkpoint_path', type=str, default=None, help="path to a checkpoint file to continue the training. EXPERIMENTAL.")
     parser.add_argument('-d', '--lr_div', type=float, default=100, help="div for pis lr")
     parser.add_argument('-m', '--lr_mult', type=float, default=1000, help="mult for a lr")
+    parser.add_argument('-msv', '--lr_mult_sv', type=float, default=1, help="mult for a lr for support vectors")
 
     parser.add_argument('-dp', '--disable_train_pis', type=str2bool, nargs='?',
                         const=False, default=False, help="disable_train_pis")
@@ -177,6 +222,16 @@ if __name__ == '__main__':
                         help="number of iterations between kernel list updates")
     parser.add_argument('-ovl', '--overlap_of_batches', type=int, default=0,
                         help="number of pixels they overlap between batches in each dimension")
+    parser.add_argument('-svreg', '--svreg', type=float, default=0, help="l1-l2 regularization for support vectors")
+    parser.add_argument('-hpc', '--hpc_mode', type=str2bool, nargs='?',
+                        const=False, default=False,
+                        help="if hpc mode only one inc step will be done.")
+    parser.add_argument('-cis', '--current_inc_step', type=int, default=0,
+                        help="current inc step to continue progress for HPC mode")
+    parser.add_argument('-kcn', '--kernel_count_norm_l1', type=str2bool, nargs='?',
+                        const=False, default=False, help="Normalization of l1-Regulariation on pis for Sparsifiacation (relevant for Kernel Adding Approach")
+    parser.add_argument('-tvs', '--train_svs', type=str2bool, nargs='?',
+                        const=False, default=False, help="Train additional Support Vectors")
 
     args = parser.parse_args()
 

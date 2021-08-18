@@ -38,6 +38,27 @@ class ImagePlotter:
             self.rows = 2
             self.cols = num_options % 4
 
+        self.cols = 1
+        if "orig" in self.options:
+            self.cols += 1
+        if "reconstruction" in self.options:
+            self.cols += 1
+        if "gating" in self.options:
+            self.cols += 1
+        if "supportvectors" in self.options:
+            self.cols += 1
+        if "pis_hist" in self.options:
+            if self.cols == 0: # case only plot pis histogram
+                self.rows == 1
+                self.cols == 1
+            else:
+                self.rows = 2
+        else:
+            self.rows = 1
+
+        if self.cols == 1:
+            raise ValueError("Nothing to plot in Options!")
+
         # self.fig, self.axes = plt.subplots(1, self.cols)  # plt.subplots(self.rows, self.cols)
 
         # TODO only hotfix to display hist properly
@@ -115,6 +136,18 @@ class ImagePlotter:
                 elif smoe.dim_domain == 4:
                     w_e_opt = w_e_opt[int(w_e_opt.shape[0]/2), int(w_e_opt.shape[1]/2), :, :]
                 ax.imshow(w_e_opt, interpolation='None', cmap='prism')
+            elif option == "supportvectors":
+                sv = smoe.session.run(smoe.SV_var)
+                shape = tuple(np.array(smoe.image.shape[0:-1]) + 2*smoe.overlap)
+                #sv = np.abs(np.reshape(sv, shape))
+                if smoe.dim_domain == 3:
+                    sv = sv[:, :, 0]
+                elif smoe.dim_domain == 4:
+                    sv = sv[int(sv.shape[0] / 2), int(sv.shape[1] / 2), :, :]
+                ax.imshow((smoe.reconstruction_sv), interpolation='None', cmap='coolwarm')
+                #ax.imshow(sv, interpolation='None', cmap='coolwarm')
+                sv_max_abs = np.max(sv)
+                ax.set_title('Max abs value: {0:2.1E}'.format(sv_max_abs), {'fontsize': 4})
             elif option == "pis_hist":
                 # TODO hist hotfix
                 ax = self.axes[-1]
@@ -122,6 +155,8 @@ class ImagePlotter:
                 pis_pos_idx = params['pis'] > 0
                 ax.hist(params['pis'][pis_pos_idx], 500)
                 used = np.count_nonzero(pis_pos_idx)
+                _, used = zip(*smoe.get_num_pis())
+                used = used[-1]
                 total = params['pis'].shape[0]
                 ax.set_title('{0:d} / {1:d} ({2:.2f})'.format(used, total, 100. * used / total))
 
@@ -164,6 +199,7 @@ class LossPlotter:
         self.ax_loss = self.fig.add_subplot(111)
         self.ax_mse = self.ax_loss.twinx()
         self.ax_pis = self.ax_loss.twinx()
+        self.ax_svs = self.ax_loss.twinx()
 
         self.ax_loss.set_ylabel('loss', color='b')
         self.ax_loss.tick_params('y', colors='b')
@@ -171,6 +207,8 @@ class LossPlotter:
         self.ax_mse.tick_params('y', colors='r')
         self.ax_pis.set_ylabel('MSE', color='gray')
         self.ax_pis.tick_params('y', colors='gray')
+        self.ax_svs.set_ylabel('Num SVs', color='black')
+        self.ax_svs.tick_params('y', colors='black')
 
         # if self.path is not None:
         #    if not os.path.exists(path):
@@ -188,8 +226,10 @@ class LossPlotter:
         self.ax_loss.clear()
         self.ax_mse.clear()
         self.ax_pis.clear()
+        self.ax_svs.clear()
 
         self.ax_pis.spines['right'].set_position(('outward', 50))
+        self.ax_svs.spines['right'].set_position(('outward', 100))
 
         if smoe.quantization_mode == 1:
             _, qlosses = zip(*smoe.get_qlosses())
@@ -197,6 +237,7 @@ class LossPlotter:
         iters_loss, losses = zip(*smoe.get_losses())
         iters_mse, mses = zip(*smoe.get_mses())
         iters_pis, pis = zip(*smoe.get_num_pis())
+        iters_svs, svs = zip(*smoe.get_num_svs())
         assert iters_loss == iters_mse and iters_mse == iters_pis, \
             "mse/loss logging out of sync" + str((iters_loss, iters_mse, iters_pis))
 
@@ -223,6 +264,7 @@ class LossPlotter:
             self.ax_loss.plot(iters_loss, qlosses, color='b', linestyle='--')
             self.ax_mse.plot(iters_mse, qmses, color='r', linestyle='--')
         self.ax_pis.plot(iters_pis, pis, color='gray')
+        self.ax_svs.plot(iters_svs, svs, color='black')
 
         if self.path:
             self.fig.savefig(self.path, bbox_inches='tight')
