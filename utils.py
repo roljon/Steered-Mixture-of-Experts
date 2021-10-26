@@ -63,6 +63,8 @@ def load_params(path):
 
 
 def read_image(path, use_yuv=True):
+    affines = None
+
     if path.lower().endswith(('.png', '.tif', '.tiff', '.pgm', '.ppm', '.jpg', '.jpeg')):
         orig = cv2.imread(path)
         # check if orig is grayscale image:
@@ -106,6 +108,15 @@ def read_image(path, use_yuv=True):
     elif path.lower().endswith('.yuv'):
         # TODO read raw video by OpenCV
         raise ValueError("Raw Video Data is not supported yet!")
+    elif path.lower().endswith('.npz'):
+        npz = np.load(path)
+        orig = np.moveaxis(npz["imgs"], 0, -2)
+        if use_yuv:
+            for ii in range(orig.shape[2]):
+                yuv_frame = cv2.cvtColor(orig[:,:,ii,:], cv2.COLOR_RGB2YUV)
+                orig[:, :, ii, :] = yuv_frame
+
+        affines = npz["affines"]
     else:
         raise ValueError("Unknown data format")
 
@@ -116,7 +127,8 @@ def read_image(path, use_yuv=True):
         orig = orig.astype(np.float32) / 2**16.
         precision = 16
 
-    return orig, precision
+
+    return orig, precision, affines
 
 def write_image(img, path, type, yuv, precision):
     if precision == 8:

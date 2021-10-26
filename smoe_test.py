@@ -33,7 +33,7 @@ def main(image_path, results_path, iterations, iterations_inc, iterations_all, i
     if quantization_mode >= 2:
         quantize_pis = True
 
-    orig, precision = read_image(image_path, use_yuv)
+    orig, precision, affines = read_image(image_path, use_yuv)
 
     if not orig.shape[-1] == 3:
         use_yuv = False
@@ -66,7 +66,8 @@ def main(image_path, results_path, iterations, iterations_inc, iterations_all, i
                 train_gammas=not disable_train_gammas, train_musx=not disable_train_musx, use_diff_center=use_diff_center, radial_as=radial_as, start_batches=batches,
                 batch_size=batch_size, use_determinant=use_determinant, normalize_pis=normalize_pis, quantization_mode=quantization_mode,
                 bit_depths=bit_depths, quantize_pis=quantize_pis, lower_bounds=lower_bounds, upper_bounds=upper_bounds,
-                use_yuv=use_yuv, only_y_gamma=only_y_gamma, ssim_opt=ssim_opt, precision=precision, add_kernel_slots=inc_steps*np.prod(kernels_per_dim), overlap_of_batches=overlap_of_batches, kernel_count_as_norm_l1=kernel_count_norm_l1, train_svs=train_svs)
+                use_yuv=use_yuv, only_y_gamma=only_y_gamma, ssim_opt=ssim_opt, precision=precision, add_kernel_slots=inc_steps*np.prod(kernels_per_dim), overlap_of_batches=overlap_of_batches, kernel_count_as_norm_l1=kernel_count_norm_l1, train_svs=train_svs, affines=affines)
+
 
     if not train_svs:
         lr_mult_sv = 0
@@ -87,6 +88,13 @@ def main(image_path, results_path, iterations, iterations_inc, iterations_all, i
 
     if checkpoint_path is not None:
         smoe.restore(checkpoint_path)
+        if normalize_pis:
+            smoe.get_reconstruction()
+            kernel_list = np.zeros((smoe.start_pis,))
+            for ii in range(len(smoe.kernel_list_per_batch)):
+                kernel_list = np.logical_or(kernel_list, smoe.kernel_list_per_batch[ii])
+            smoe.session.run([smoe.re_normalize_pis_op], feed_dict={smoe.kernel_list: kernel_list})
+        smoe.update_kernel_list()
 
     if overlap_of_batches > 0:
         sampling_percentage = 100 # otherwise it is not working!

@@ -11,6 +11,7 @@ from quantizer import quantize_params, rescaler
 from scipy.ndimage import gaussian_filter
 from ops.image_ops_impl import custom_ssim
 import cv2
+from scipy.cluster.vq import vq, kmeans, whiten
 
 
 def sliding_window(image, Overlap, BatchSize):
@@ -36,7 +37,7 @@ class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1,
                  batch_size=None, train_gammas=True, train_musx=True, use_diff_center=False, radial_as=False, use_determinant=False,
                  normalize_pis=True, quantization_mode=0, bit_depths=None, quantize_pis=False, lower_bounds=None,
-                 upper_bounds=None, use_yuv=True, only_y_gamma=False, ssim_opt=False, precision=8, add_kernel_slots=0, iter_offset=0, margin=0.5, overlap_of_batches=0, kernel_count_as_norm_l1=False, train_svs=False):
+                 upper_bounds=None, use_yuv=True, only_y_gamma=False, ssim_opt=False, precision=8, add_kernel_slots=0, iter_offset=0, margin=0.5, overlap_of_batches=0, kernel_count_as_norm_l1=False, train_svs=False, affines=None):
         self.batch_shape = None
         self.use_yuv = use_yuv
         self.only_y_gamma = only_y_gamma
@@ -231,8 +232,20 @@ class Smoe:
         self.session = tf.InteractiveSession(config=tf.ConfigProto(gpu_options=gpu_options))
         # self.session = tf.Session()
 
+        if affines is not None:
+            self.do_perspectiveTransform(affines, kernels_per_dim)
+
         self.init_model(self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init, add_kernel_slots)
         self.initialize_kernel_list(add_kernel_slots)
+
+        if affines is not None:
+            w = self.get_weight_matrix_argmax()
+            nue_init_transformed = []
+            for ii in range(len(self.pis_init)):
+                nue_init_transformed.append(np.mean(self.image[w == ii], axis=0))
+            nue_init_transformed_ = np.stack(nue_init_transformed)
+            self.session.run([self.re_assign_nue_op], feed_dict={self.nu_e: nue_init_transformed_})
+
         #self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches
 
     def init_model(self, nu_e_init, gamma_e_init, pis_init, musX_init, A_init, add_kernel_slots=0):
@@ -526,6 +539,11 @@ class Smoe:
         gamma_e = self.gamma_e
         A = self.A
         pis = self.pis
+
+        self.re_assign_nue_op = tf.assign(self.nu_e_var, nu_e)
+
+        normalized_pis = self.pis_var / tf.reduce_sum(pis)
+        self.re_normalize_pis_op = tf.assign(self.pis_var, normalized_pis)
 
         musX = tf.expand_dims(musX, axis=1)
         # prepare domain
@@ -1307,27 +1325,31 @@ class Smoe:
             num_all_kernels = self.start_pis
         w_matrix = np.zeros((num_all_kernels,) + self.image.shape[:-1])
 
-        #widgets = [
-        #    progressbar.AnimatedMarker(markers='◐◓◑◒'),
-        #    ' Iteration: {0}  '.format(self.iter),
-        #    ' ', progressbar.Counter('%(value)d/{0}'.format(self.start_batches)),
-        #    ' ', progressbar.Timer(),
-        #]
-        #bar = progressbar.ProgressBar(widgets=widgets)
+        widgets = [
+            progressbar.AnimatedMarker(markers='◐◓◑◒'),
+            ' Iteration: {0}  '.format(self.iter),
+            ' ', progressbar.Counter('%(value)d/{0}'.format(self.start_batches)),
+            ' ', progressbar.Timer(),
+        ]
+        bar = progressbar.ProgressBar(widgets=widgets)
 
         ii = -1
-        #for (coord, batch) in bar(sliding_window(self.joint_domain, self.overlap, self.batch_size_valued)):
-        for (coord, batch) in sliding_window(self.joint_domain, self.overlap, self.batch_size_valued):    
+        for (coord, batch) in bar(sliding_window(self.joint_domain, self.overlap, self.batch_size_valued)):
+        #for (coord, batch) in sliding_window(self.joint_domain, self.overlap, self.batch_size_valued):
             ii = ii + 1
             retrieve = [self.loss_op, self.mse_op, self.num_pi_op, self.num_sv_op]
             if not with_quantized_params:
                 retrieve.append(self.indices)
 
             img_patch = batch.reshape(-1, batch.shape[-1])
-            bool_mask_sv = np.zeros(self.image.shape[0:-1], dtype=np.bool)
-            bool_mask_sv = np.pad(bool_mask_sv, ((self.overlap, self.overlap), (self.overlap, self.overlap)), 'constant', constant_values=False)
-            bool_mask_sv[coord[0] + self.overlap:batch.shape[0] + coord[0] + self.overlap, coord[1] + self.overlap:batch.shape[1] + coord[1] + self.overlap] = True
-            bool_mask_sv = bool_mask_sv.reshape(-1,)
+            if self.with_SV:
+                if self.dim_domain > 2:
+                    assert "only works for imgs so far"
+                bool_mask_sv = np.zeros(self.image.shape[0:-1], dtype=np.bool)
+                bool_mask_sv = np.pad(bool_mask_sv, ((self.overlap, self.overlap), (self.overlap, self.overlap)), 'constant', constant_values=False)
+                bool_mask_sv[coord[0] + self.overlap:batch.shape[0] + coord[0] + self.overlap, coord[1] + self.overlap:batch.shape[1] + coord[1] + self.overlap] = True
+                bool_mask_sv = bool_mask_sv.reshape(-1,)
+
 
             if train and self.dim_domain >= 4:
                 img_patch = img_patch[self.train_mask]
@@ -1526,6 +1548,47 @@ class Smoe:
         self.batch_shape = self.get_batch_shape(self.start_batches, joint_domain.shape)
         self.joint_domain = joint_domain
 
+    def do_perspectiveTransform(self, affines, kernels_per_dim):
+        coords = np.moveaxis(np.indices(self.image.shape[0:-2], dtype=np.float32), 0, -1)[..., ::-1]
+        coordss = []
+        for affine_cascade in affines:
+            coords_trans = cv2.perspectiveTransform(coords, np.vstack((affine_cascade, np.array([0, 0, 1]))))
+            coordss.append(coords_trans)
+        coordss = np.stack(coordss, axis=0)
+        #coordss = np.moveaxis(coordss[0] / 127, 0, 1)
+        coordss[:, :, :, 0] = (coordss[:, :, :, 0] - np.min(coordss[:, :, :, 0])) / (np.max(coordss[:, :, :, 0]) - np.min(coordss[:, :, :, 0]))
+        coordss[:, :, :, 1] = (coordss[:, :, :, 1] - np.min(coordss[:, :, :, 1])) / (
+                    np.max(coordss[:, :, :, 1]) - np.min(coordss[:, :, :, 1]))
+
+        for ii in range(coordss.shape[0]):
+                #self.joint_domain[:, :, ii, 0:2] = np.moveaxis(coordss[ii] / 127, 0, 1)
+                self.joint_domain[:, :, ii, 0:2] = coordss[ii]# / 127
+
+        cnt = 0
+        musX_new = np.zeros_like(self.musX_init)
+        for xx in range(kernels_per_dim[1]):
+            for yy in range(kernels_per_dim[0]):
+                for zz in range(kernels_per_dim[2]):
+                    zz_start = np.int(np.round(self.image.shape[2]/kernels_per_dim[2])*zz)
+                    zz_end =  np.int(np.minimum(np.round(self.image.shape[2]/kernels_per_dim[2])*(zz+1), self.image.shape[2]))
+                    #print(zz_start, zz_end)
+
+                    xx_start = np.int(np.round(self.image.shape[1]/kernels_per_dim[1])*xx)
+                    xx_end =  np.int(np.minimum(np.round(self.image.shape[1]/kernels_per_dim[1])*(xx+1), self.image.shape[1]))
+                    #print(xx_start, xx_end)
+
+                    yy_start = np.int(np.round(self.image.shape[0] / kernels_per_dim[0]) * yy)
+                    yy_end = np.int(np.minimum(np.round(self.image.shape[0] / kernels_per_dim[0]) * (yy + 1),
+                                        self.image.shape[0]))
+                    #print(yy_start, yy_end)
+
+                    musX_new[cnt,:] = np.mean(self.joint_domain[yy_start:yy_end, xx_start:xx_end, zz_start:zz_end, 0:3], axis=(0, 1, 2))
+                    cnt = cnt + 1
+        self.musX_init = musX_new
+        self.nu_e_init = np.ones_like(self.nu_e_init) * .5
+
+
+
     def get_iter(self):
         return self.iter
 
@@ -1546,6 +1609,7 @@ class Smoe:
             np.fill_diagonal(A_prototype, 2 * (kernels_per_dim[0] + 1))
             number_of_kernel = kernels_per_dim[0] ** dim_of_domain
         self.A_init = np.tile(A_prototype, (number_of_kernel, 1, 1))
+        #self.A_init = self.A_init / 8
 
     def generate_experts(self, with_means=True):
         assert self.musX_init is not None, "need musX to generate experts"
@@ -1622,7 +1686,7 @@ class Smoe:
     def generate_pis(self, normalize_pis):
         number = self.musX_init.shape[0]
         if normalize_pis:
-            self.pis_init = np.ones((number,), dtype=np.float32) / number
+            self.pis_init = np.ones((number,), dtype=np.float32) / (number)
         else:
             self.pis_init = np.ones((number,), dtype=np.float32)
 
