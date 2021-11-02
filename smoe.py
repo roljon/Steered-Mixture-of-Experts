@@ -107,6 +107,7 @@ class Smoe:
         self.mse_op = None
         self.target_op = None
         self.domain_op = None
+        self.domain_final = None
         self.joint_domain_batched_op = None
         self.pis_l1 = None
         self.u_l1 = None
@@ -175,6 +176,9 @@ class Smoe:
         self.upper_bounds = upper_bounds
         self.with_SV = train_svs
 
+        self.affines = affines
+        self.transformed_domain = None
+
         # generate initializations
         self.start_batches = start_batches  # start_batches corresponds to desired batch numbers
         self.image = image
@@ -232,13 +236,16 @@ class Smoe:
         self.session = tf.InteractiveSession(config=tf.ConfigProto(gpu_options=gpu_options))
         # self.session = tf.Session()
 
-        if affines is not None:
+        if self.affines is not None:
             self.do_perspectiveTransform(affines, kernels_per_dim)
+            self.initialize_frames_list()
 
-        self.init_model(self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init, add_kernel_slots)
+
+        self.init_model(self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init, self.affines, add_kernel_slots)
         self.initialize_kernel_list(add_kernel_slots)
+        #self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches
 
-        if affines is not None:
+        if self.affines is not None:
             w = self.get_weight_matrix_argmax()
             nue_init_transformed = []
             for ii in range(len(self.pis_init)):
@@ -246,9 +253,7 @@ class Smoe:
             nue_init_transformed_ = np.stack(nue_init_transformed)
             self.session.run([self.re_assign_nue_op], feed_dict={self.nu_e: nue_init_transformed_})
 
-        #self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches
-
-    def init_model(self, nu_e_init, gamma_e_init, pis_init, musX_init, A_init, add_kernel_slots=0):
+    def init_model(self, nu_e_init, gamma_e_init, pis_init, musX_init, A_init, affines, add_kernel_slots=0):
 
         # TODO make radial work again, uncomment for pcs scripts
         if A_init.ndim == 1:
@@ -469,6 +474,32 @@ class Smoe:
 
         self.kernel_list = tf.placeholder(shape=(None,), dtype=tf.bool)
 
+        if affines is not None:
+            self.frames_list = tf.placeholder(shape=(None,), dtype=tf.bool)
+
+            h11_op = tf.constant(affines[:, 0, 0], tf.float32)
+            h12_op = tf.constant(affines[:, 0, 1], tf.float32)
+            h13_op = tf.constant(affines[:, 0, 2] / (self.image.shape[1] - 1), tf.float32)
+
+            h21_op = tf.constant(affines[:, 1, 0], tf.float32)
+            h22_op = tf.constant(affines[:, 1, 1], tf.float32)
+            h23_op = tf.constant(affines[:, 1, 2] / (self.image.shape[0] - 1), tf.float32)
+
+            h11_f = tf.tile(tf.boolean_mask(h11_op, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+            h12_f = tf.tile(tf.boolean_mask(h12_op, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+            h13_f = tf.tile(tf.boolean_mask(h13_op, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+
+            h21_f = tf.tile(tf.boolean_mask(h21_op, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+            h22_f = tf.tile(tf.boolean_mask(h22_op, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+            h23_f = tf.tile(tf.boolean_mask(h23_op, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+
+            x_dash = h11_f * self.domain_op[:, 1] + h12_f * self.domain_op[:, 0] + h13_f
+            y_dash = h21_f * self.domain_op[:, 1] + h22_f * self.domain_op[:, 0] + h23_f
+
+            self.domain_final = tf.stack([y_dash, x_dash, self.domain_op[:, -1]], axis=1)
+        else:
+            self.domain_final = self.domain_op
+
         if self.with_SV:
             self.mask_of_sv_in_batch = tf.placeholder(shape=(None,), dtype=tf.bool)
             '''
@@ -478,9 +509,9 @@ class Smoe:
                               tf.transpose(dist))
             my_kernel = tf.exp(tf.multiply(self.bw_SV, tf.abs(sq_dists)))
             '''
-            domain_exp_sv = self.domain_op
-            domain_exp_sv = tf.tile(tf.expand_dims(domain_exp_sv, axis=0), (tf.shape(self.domain_op)[0], 1, 1))
-            x_sub_mu_sv = tf.expand_dims(domain_exp_sv - tf.expand_dims(self.domain_op, axis=1), axis=-1)
+            domain_exp_sv = self.domain_final
+            domain_exp_sv = tf.tile(tf.expand_dims(domain_exp_sv, axis=0), (tf.shape(domain)[0], 1, 1))
+            x_sub_mu_sv = tf.expand_dims(domain_exp_sv - tf.expand_dims(self.domain_final, axis=1), axis=-1)
             A_SV = tf.linalg.band_part(self.bw_diag_SV, 0, 0) \
                 + tf.linalg.band_part(tf.linalg.set_diag(self.bw_corr_SV, np.zeros((np.prod(self.joint_domain.shape[0:-1]), self.dim_domain))), -1, 0)
             A_SV = tf.boolean_mask(A_SV, self.mask_of_sv_in_batch)
@@ -547,7 +578,7 @@ class Smoe:
 
         musX = tf.expand_dims(musX, axis=1)
         # prepare domain
-        domain_exp = self.domain_op
+        domain_exp = self.domain_final
         domain_exp = tf.tile(tf.expand_dims(domain_exp, axis=0), (tf.shape(musX)[0], 1, 1))
 
         x_sub_mu = tf.expand_dims(domain_exp - musX, axis=-1)
@@ -586,7 +617,7 @@ class Smoe:
         nu_e = tf.expand_dims(tf.transpose(nu_e), axis=-1)
         if self.train_gammas:
             # TODO reorder nu_e and gamma_e to avoid unnecessary transpositions
-            domain_tiled = tf.expand_dims(tf.transpose(self.domain_op), axis=0)
+            domain_tiled = tf.expand_dims(tf.transpose(self.domain_final), axis=0)
             domain_tiled = tf.tile(domain_tiled, (num_channels, 1, 1))
             sloped_out = tf.matmul(tf.transpose(gamma_e, perm=[2, 0, 1]), domain_tiled)
             self.res = tf.reduce_sum(self.w_e_op * (sloped_out + nu_e), axis=1)
@@ -1382,6 +1413,9 @@ class Smoe:
                 retrieve.append(self.w_e_out_op)
                 retrieve.append(self.sampl_prob)
 
+            if self.affines is not None:
+                feed_dict.update({self.frames_list: self.frames_list_per_batch[ii]})
+
             results = self.session.run(retrieve, feed_dict=feed_dict)
             if update_reconstruction:
                 if train:
@@ -1549,20 +1583,11 @@ class Smoe:
         self.joint_domain = joint_domain
 
     def do_perspectiveTransform(self, affines, kernels_per_dim):
-        coords = np.moveaxis(np.indices(self.image.shape[0:-2], dtype=np.float32), 0, -1)[..., ::-1]
-        coordss = []
-        for affine_cascade in affines:
-            coords_trans = cv2.perspectiveTransform(coords, np.vstack((affine_cascade, np.array([0, 0, 1]))))
-            coordss.append(coords_trans)
-        coordss = np.stack(coordss, axis=0)
-        #coordss = np.moveaxis(coordss[0] / 127, 0, 1)
-        coordss[:, :, :, 0] = (coordss[:, :, :, 0] - np.min(coordss[:, :, :, 0])) / (np.max(coordss[:, :, :, 0]) - np.min(coordss[:, :, :, 0]))
-        coordss[:, :, :, 1] = (coordss[:, :, :, 1] - np.min(coordss[:, :, :, 1])) / (
-                    np.max(coordss[:, :, :, 1]) - np.min(coordss[:, :, :, 1]))
+        transformed_domain = self.joint_domain.copy()
 
-        for ii in range(coordss.shape[0]):
-                #self.joint_domain[:, :, ii, 0:2] = np.moveaxis(coordss[ii] / 127, 0, 1)
-                self.joint_domain[:, :, ii, 0:2] = coordss[ii]# / 127
+        for ii, affine in enumerate(affines):
+            transformed_domain[:, :, ii, 0] = affine[1, 0] * self.joint_domain[:, :, ii, 1] + affine[1, 1] * self.joint_domain[:, :, ii, 0] + affine[1, 2] / 127
+            transformed_domain[:, :, ii, 1] = affine[0, 0] * self.joint_domain[:, :, ii, 1] + affine[0, 1] * self.joint_domain[:, :, ii, 0] + affine[0, 2] / 127
 
         cnt = 0
         musX_new = np.zeros_like(self.musX_init)
@@ -1582,11 +1607,12 @@ class Smoe:
                                         self.image.shape[0]))
                     #print(yy_start, yy_end)
 
-                    musX_new[cnt,:] = np.mean(self.joint_domain[yy_start:yy_end, xx_start:xx_end, zz_start:zz_end, 0:3], axis=(0, 1, 2))
+                    musX_new[cnt, :] = np.mean(transformed_domain[yy_start:yy_end, xx_start:xx_end, zz_start:zz_end, 0:3], axis=(0, 1, 2))
                     cnt = cnt + 1
+
         self.musX_init = musX_new
         self.nu_e_init = np.ones_like(self.nu_e_init) * .5
-
+        self.transformed_domain = transformed_domain
 
 
     def get_iter(self):
@@ -1695,14 +1721,19 @@ class Smoe:
         if add_kernel_slots > 0:
             num_of_all_kernels = 2*num_of_all_kernels + add_kernel_slots
 
+        if self.affines is not None:
+            joint_domain = self.transformed_domain
+        else:
+            joint_domain = self.joint_domain
+
         batch_center = []
-        for (coord, batch) in sliding_window(self.joint_domain, self.overlap, self.batch_size_valued):
+        for (coord, batch) in sliding_window(joint_domain, self.overlap, self.batch_size_valued):
             batch_center.append(np.mean(batch, axis=tuple(np.arange(self.dim_domain))))
         batch_center = np.stack(batch_center)
 
         maha_dists = []
         for k in range(batch_center.shape[0]):
-            results = self.session.run([self.maha_dist], feed_dict={self.joint_domain_batched_op:  np.expand_dims(batch_center[k], axis=0),
+            results = self.session.run([self.maha_dist], feed_dict={self.domain_final:  np.expand_dims(batch_center[k][:self.dim_domain], axis=0),
                                                                  self.kernel_list: np.ones((num_of_all_kernels,),
                                                                                            dtype=bool),
                                                                     self.stack_inc: [0.],
@@ -1725,10 +1756,16 @@ class Smoe:
         num_of_all_kernels = self.start_pis
         if add_kernel_slots > 0:
             num_of_all_kernels = 2*num_of_all_kernels + add_kernel_slots
+
+        if self.affines is not None:
+            joint_domain = self.transformed_domain
+        else:
+            joint_domain = self.joint_domain
+
         # DAMIT DAS HIER WIEDER GEHT, ZUNÄCHST BATCHES ERSTELLEN MIT GENERATOR UND DANN MINS; MAXS BESTIMMEN!!
         mins = []
         maxs = []
-        for (coord, batch) in sliding_window(self.joint_domain, self.overlap, self.batch_size_valued):
+        for (coord, batch) in sliding_window(joint_domain, self.overlap, self.batch_size_valued):
             mins.append(np.min(batch, axis=tuple(np.arange(self.dim_domain))))
             maxs.append(np.max(batch, axis=tuple(np.arange(self.dim_domain))))
         mins = np.stack(mins)
@@ -1741,7 +1778,7 @@ class Smoe:
         for k in range(mins.shape[0]):
             edges_batch = np.array(list(product(*tt[k, :, :])))
             edges_batch = np.concatenate((edges_batch, np.zeros((edges_batch.shape[0], self.image.shape[-1]))), axis=1)
-            results = self.session.run([self.maha_dist_ind], feed_dict={self.joint_domain_batched_op: edges_batch,
+            results = self.session.run([self.maha_dist_ind], feed_dict={self.domain_final: edges_batch[:,:self.dim_domain],
                                                                   self.kernel_list: np.ones((num_of_all_kernels,),
                                                                                             dtype=bool),
                                                                     self.stack_inc: [1.],
@@ -1750,6 +1787,13 @@ class Smoe:
             bool_mask = np.zeros((num_of_all_kernels,), dtype=bool)
             bool_mask[results[0]] = True
             self.kernel_list_per_batch[k] = np.logical_or(self.kernel_list_per_batch[k], bool_mask)
+
+    def initialize_frames_list(self):
+        self.frames_list_per_batch = []
+        for (coord, batch) in sliding_window(self.joint_domain, self.overlap, self.batch_size_valued):
+            frames_list = np.zeros((self.image.shape[2],), dtype=bool)
+            frames_list[ coord[2] : coord[2] + self.batch_size_valued[2] ] = True
+            self.frames_list_per_batch.append(frames_list)
 
     def get_train_mask(self):
         if self.dim_domain >= 4:
