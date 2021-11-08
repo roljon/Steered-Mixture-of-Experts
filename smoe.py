@@ -37,7 +37,7 @@ class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1,
                  batch_size=None, train_gammas=True, train_musx=True, use_diff_center=False, radial_as=False, use_determinant=False,
                  normalize_pis=True, quantization_mode=0, bit_depths=None, quantize_pis=False, lower_bounds=None,
-                 upper_bounds=None, use_yuv=True, only_y_gamma=False, ssim_opt=False, precision=8, add_kernel_slots=0, iter_offset=0, margin=0.5, overlap_of_batches=0, kernel_count_as_norm_l1=False, train_svs=False, affines=None):
+                 upper_bounds=None, use_yuv=True, only_y_gamma=False, ssim_opt=False, precision=8, add_kernel_slots=0, iter_offset=0, margin=0.5, overlap_of_batches=0, kernel_count_as_norm_l1=False, train_svs=False, affines=None, train_trafo=False):
         self.batch_shape = None
         self.use_yuv = use_yuv
         self.only_y_gamma = only_y_gamma
@@ -78,6 +78,17 @@ class Smoe:
         self.A_corr_inc_var = None
         self.gamma_e_inc_var = None
         self.nu_e_inc_var = None
+
+        # tf affine trafo vars
+        self.h11_var = None
+        self.h12_var = None
+        self.h13_var = None
+        self.h21_var = None
+        self.h22_var = None
+        self.h23_var = None
+        self.stop_first_gradient_op = None
+        self.h31_var = None
+        self.h32_var = None
 
         # tf inc ops
         self.stack_inc = None
@@ -122,6 +133,8 @@ class Smoe:
         self.var_opt1 = None
         self.var_opt2 = None
         self.var_opt3 = None
+        self.var_opt4 = None
+        self.var_opt5 = None
         # tf ops - feeding points
         self.musX = None
         self.nu_e = None
@@ -139,6 +152,8 @@ class Smoe:
         self.optimizer1 = None
         self.optimizer2 = None
         self.optimizer3 = None
+        self.optimizer4 = None
+        self.optimizer5 = None
 
         # others
         # TODO refactor to logger class
@@ -175,6 +190,7 @@ class Smoe:
         self.lower_bounds = lower_bounds
         self.upper_bounds = upper_bounds
         self.with_SV = train_svs
+        self.train_trafo = train_trafo
 
         self.affines = affines
         self.transformed_domain = None
@@ -238,7 +254,10 @@ class Smoe:
 
         if self.affines is not None:
             self.do_perspectiveTransform(affines, kernels_per_dim)
+        if self.affines is not None or self.dim_domain == 3 and self.train_trafo:
             self.initialize_frames_list()
+            if self.affines is None:
+                self.transformed_domain = self.joint_domain.copy()
 
 
         self.init_model(self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init, self.affines, add_kernel_slots)
@@ -474,29 +493,53 @@ class Smoe:
 
         self.kernel_list = tf.placeholder(shape=(None,), dtype=tf.bool)
 
-        if affines is not None:
+        if self.dim_domain == 3 and self.train_trafo or affines is not None:
             self.frames_list = tf.placeholder(shape=(None,), dtype=tf.bool)
 
-            h11_op = tf.constant(affines[:, 0, 0], tf.float32)
-            h12_op = tf.constant(affines[:, 0, 1], tf.float32)
-            h13_op = tf.constant(affines[:, 0, 2] / (self.image.shape[1] - 1), tf.float32)
+            if affines is not None:
+                self.h11_var = tf.Variable(affines[:, 0, 0], trainable=self.train_trafo, dtype=tf.float32)
+                self.h12_var = tf.Variable(affines[:, 0, 1], trainable=self.train_trafo, dtype=tf.float32)
+                self.h13_var = tf.Variable(affines[:, 0, 2] / (self.image.shape[1] - 1), trainable=self.train_trafo,
+                                           dtype=tf.float32)
 
-            h21_op = tf.constant(affines[:, 1, 0], tf.float32)
-            h22_op = tf.constant(affines[:, 1, 1], tf.float32)
-            h23_op = tf.constant(affines[:, 1, 2] / (self.image.shape[0] - 1), tf.float32)
+                self.h21_var = tf.Variable(affines[:, 1, 0], trainable=self.train_trafo, dtype=tf.float32)
+                self.h22_var = tf.Variable(affines[:, 1, 1], trainable=self.train_trafo, dtype=tf.float32)
+                self.h23_var = tf.Variable(affines[:, 1, 2] / (self.image.shape[0] - 1), trainable=self.train_trafo,
+                                           dtype=tf.float32)
 
-            h11_f = tf.tile(tf.boolean_mask(h11_op, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
-            h12_f = tf.tile(tf.boolean_mask(h12_op, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
-            h13_f = tf.tile(tf.boolean_mask(h13_op, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+                self.h31_var = tf.Variable(np.zeros_like(affines[:, 0, 0]), trainable=self.train_trafo,
+                                           dtype=tf.float32)
+                self.h32_var = tf.Variable(np.zeros_like(affines[:, 0, 0]), trainable=self.train_trafo,
+                                           dtype=tf.float32)
+            else:
+                self.h11_var = tf.Variable(np.ones((self.image.shape[2],)), trainable=self.train_trafo, dtype=tf.float32)
+                self.h12_var = tf.Variable(np.zeros((self.image.shape[2],)), trainable=self.train_trafo, dtype=tf.float32)
+                self.h13_var = tf.Variable(np.zeros((self.image.shape[2],)), trainable=self.train_trafo, dtype=tf.float32)
 
-            h21_f = tf.tile(tf.boolean_mask(h21_op, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
-            h22_f = tf.tile(tf.boolean_mask(h22_op, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
-            h23_f = tf.tile(tf.boolean_mask(h23_op, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+                self.h21_var = tf.Variable(np.zeros((self.image.shape[2],)), trainable=self.train_trafo, dtype=tf.float32)
+                self.h22_var = tf.Variable(np.ones((self.image.shape[2],)), trainable=self.train_trafo, dtype=tf.float32)
+                self.h23_var = tf.Variable(np.zeros((self.image.shape[2],)), trainable=self.train_trafo, dtype=tf.float32)
+
+                self.h31_var = tf.Variable(np.zeros((self.image.shape[2],)), trainable=self.train_trafo, dtype=tf.float32)
+                self.h32_var = tf.Variable(np.zeros((self.image.shape[2],)), trainable=self.train_trafo, dtype=tf.float32)
+
+            h11_f = tf.tile(tf.boolean_mask(self.h11_var, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+            h12_f = tf.tile(tf.boolean_mask(self.h12_var, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+            h13_f = tf.tile(tf.boolean_mask(self.h13_var, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+
+            h21_f = tf.tile(tf.boolean_mask(self.h21_var, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+            h22_f = tf.tile(tf.boolean_mask(self.h22_var, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+            h23_f = tf.tile(tf.boolean_mask(self.h23_var, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+
+            h31_f = tf.tile(tf.boolean_mask(self.h31_var, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+            h32_f = tf.tile(tf.boolean_mask(self.h32_var, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
 
             x_dash = h11_f * self.domain_op[:, 1] + h12_f * self.domain_op[:, 0] + h13_f
             y_dash = h21_f * self.domain_op[:, 1] + h22_f * self.domain_op[:, 0] + h23_f
 
-            self.domain_final = tf.stack([y_dash, x_dash, self.domain_op[:, -1]], axis=1)
+            w_dash = h31_f * self.domain_op[:, 1] + h32_f * self.domain_op[:, 0] + 1
+
+            self.domain_final = tf.stack([y_dash / w_dash, x_dash / w_dash, self.domain_op[:, -1]], axis=1)
         else:
             self.domain_final = self.domain_op
 
@@ -828,7 +871,7 @@ class Smoe:
         self.save_op.restore(self.session, path)
         print("Model restored from file: %s" % path)
 
-    def set_optimizer(self, optimizer1, optimizer2=None, optimizer3=None, optimizer4=None, grad_clip_value_abs=None):
+    def set_optimizer(self, optimizer1, optimizer2=None, optimizer3=None, optimizer4=None, optimizer5=None, grad_clip_value_abs=None):
         self.optimizer1 = optimizer1
 
         if optimizer2 is None:
@@ -846,6 +889,11 @@ class Smoe:
         else:
             self.optimizer4 = optimizer4
 
+        if optimizer5 is None:
+            self.optimizer5 = optimizer1
+        else:
+            self.optimizer5 = optimizer5
+
         var_opt1 = [self.nu_e_var, self.gamma_e_var, self.musX_var]
         var_opt2 = [self.pis_var]
         var_opt3 = [self.A_diagonal_var, self.A_corr_var]
@@ -853,6 +901,7 @@ class Smoe:
             var_opt4 = [self.SV_var, self.bw_diag_SV, self.bw_corr_SV]
         else:
             var_opt4 = []
+        var_opt5 = [self.h11_var, self.h12_var, self.h13_var, self.h21_var, self.h22_var, self.h23_var, self.h31_var, self.h32_var]
 
         # sort out not trainable vars
         self.var_opt1 = [var for var in var_opt1 if var in tf.trainable_variables()]
@@ -860,6 +909,7 @@ class Smoe:
         self.var_opt3 = [var for var in var_opt3 if var in tf.trainable_variables()]
         if self.with_SV:
             self.var_opt4 = [var for var in var_opt4 if var in tf.trainable_variables()]
+        self.var_opt5 = [var for var in var_opt5 if var in tf.trainable_variables()]
 
         variables = []
         if not optimizer1._lr == 0:
@@ -882,6 +932,11 @@ class Smoe:
             len4 = len(self.var_opt4)
         else:
             len4 = 0
+        if not optimizer5._lr == 0:
+            variables += self.var_opt5
+            len5 = len(self.var_opt5)
+        else:
+            len5 = 0
         accum_gradients = [tf.Variable(tf.zeros_like(var.initialized_value()), trainable=False)
                            for var in variables]
         self.zero_op = [grad.assign(tf.zeros_like(grad)) for grad in accum_gradients]
@@ -890,6 +945,11 @@ class Smoe:
 
         if grad_clip_value_abs is not None:
             accum_gradients = [tf.clip_by_value(g, -grad_clip_value_abs, grad_clip_value_abs) for g in accum_gradients]
+
+        if self.affines is not None and self.train_trafo or self.dim_domain == 3 and self.train_trafo:
+            manip = np.ones((self.image.shape[2],))
+            manip[0] = 0 # first frame doesn't need to be transformed
+            self.stop_first_gradient_op = [accum_gradients[ii].assign(accum_gradients[ii] * manip) for ii in range(len(accum_gradients) - len5, len(accum_gradients))]
 
         '''
         gradients1 = accum_gradients[:len(self.var_opt1)]
@@ -902,6 +962,7 @@ class Smoe:
         gradients2 = [accum_gradients.pop(0) for g in range(len2)]
         gradients3 = [accum_gradients.pop(0) for g in range(len3)]
         gradients4 = [accum_gradients.pop(0) for g in range(len4)]
+        gradients5 = [accum_gradients.pop(0) for g in range(len5)]
 
         if len1 > 0:
             train_op1 = self.optimizer1.apply_gradients(zip(gradients1, self.var_opt1))
@@ -919,7 +980,11 @@ class Smoe:
             train_op4 = self.optimizer4.apply_gradients(zip(gradients4, self.var_opt4))
         else:
             train_op4 = tf.no_op()
-        self.train_op = tf.group(train_op1, train_op2, train_op3, train_op4)
+        if len5 > 0:
+            train_op5 = self.optimizer5.apply_gradients(zip(gradients5, self.var_opt5))
+        else:
+            train_op5 = tf.no_op()
+        self.train_op = tf.group(train_op1, train_op2, train_op3, train_op4, train_op5)
 
         uninitialized_vars = []
         for var in tf.global_variables():
@@ -1259,6 +1324,10 @@ class Smoe:
 
                 if update_kernel_list:
                     self.update_kernel_list(self.add_kernel_slots)
+                    if not validate:
+                        loss_val, mse_val, num_pi, num_sv = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=False,
+                                                                             update_reconstruction=False, with_inc=with_inc,
+                                                                             train_inc=False, thr_sv=5 * 10 ** -3)
 
                 if validate:
                     if self.quantization_mode >= 1:
@@ -1413,7 +1482,7 @@ class Smoe:
                 retrieve.append(self.w_e_out_op)
                 retrieve.append(self.sampl_prob)
 
-            if self.affines is not None:
+            if self.affines is not None or self.dim_domain == 3 and self.train_trafo:
                 feed_dict.update({self.frames_list: self.frames_list_per_batch[ii]})
 
             results = self.session.run(retrieve, feed_dict=feed_dict)
@@ -1497,6 +1566,8 @@ class Smoe:
                 self.qvalid = True
 
         if train:
+            if self.stop_first_gradient_op is not None:
+                self.session.run(self.stop_first_gradient_op)
             self.session.run(self.train_op)
         if train_inc:
             self.session.run(self.train_inc_op)
@@ -1586,8 +1657,8 @@ class Smoe:
         transformed_domain = self.joint_domain.copy()
 
         for ii, affine in enumerate(affines):
-            transformed_domain[:, :, ii, 0] = affine[1, 0] * self.joint_domain[:, :, ii, 1] + affine[1, 1] * self.joint_domain[:, :, ii, 0] + affine[1, 2] / 127
-            transformed_domain[:, :, ii, 1] = affine[0, 0] * self.joint_domain[:, :, ii, 1] + affine[0, 1] * self.joint_domain[:, :, ii, 0] + affine[0, 2] / 127
+            transformed_domain[:, :, ii, 0] = affine[1, 0] * self.joint_domain[:, :, ii, 1] + affine[1, 1] * self.joint_domain[:, :, ii, 0] + affine[1, 2] / (self.image.shape[1] - 1)
+            transformed_domain[:, :, ii, 1] = affine[0, 0] * self.joint_domain[:, :, ii, 1] + affine[0, 1] * self.joint_domain[:, :, ii, 0] + affine[0, 2] / (self.image.shape[0] - 1)
 
         cnt = 0
         musX_new = np.zeros_like(self.musX_init)
@@ -1721,7 +1792,7 @@ class Smoe:
         if add_kernel_slots > 0:
             num_of_all_kernels = 2*num_of_all_kernels + add_kernel_slots
 
-        if self.affines is not None:
+        if self.affines is not None or self.dim_domain == 3 and self.train_trafo:
             joint_domain = self.transformed_domain
         else:
             joint_domain = self.joint_domain
@@ -1757,8 +1828,13 @@ class Smoe:
         if add_kernel_slots > 0:
             num_of_all_kernels = 2*num_of_all_kernels + add_kernel_slots
 
-        if self.affines is not None:
-            joint_domain = self.transformed_domain
+        if self.affines is not None or self.dim_domain == 3 and self.train_trafo:
+            h11, h12, h13, h21, h22, h23 = self.session.run([self.h11_var, self.h12_var, self.h13_var, self.h21_var, self.h22_var, self.h23_var])
+            transformed_domain = self.joint_domain.copy()
+            for ii in range(self.image.shape[2]):
+                transformed_domain[:, :, ii, 0] = h12[ii] * self.joint_domain[:, :, ii, 1] + h22[ii] * self.joint_domain[:, :, ii, 0] + h23[ii]
+                transformed_domain[:, :, ii, 1] = h11[ii] * self.joint_domain[:, :, ii, 1] + h12[ii] * self.joint_domain[:, :, ii, 0] + h13[ii]
+            joint_domain = transformed_domain
         else:
             joint_domain = self.joint_domain
 

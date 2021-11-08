@@ -19,7 +19,7 @@ from utils import save_model, load_params, read_image
 def main(image_path, results_path, iterations, iterations_inc, iterations_all, inc_steps, threshold_rel, validation_iterations, kernels_per_dim, params_file, l1reg, base_lr,
          batches, batch_size, checkpoint_path, lr_div, lr_mult, lr_mult_sv, disable_train_pis, disable_train_gammas, disable_train_musx,
          use_diff_center, radial_as, use_determinant, normalize_pis, quantization_mode, bit_depths, quantize_pis, lower_bounds,
-         upper_bounds, use_yuv, only_y_gamma, ssim_opt, sampling_percentage, update_kernel_list_iterations, overlap_of_batches, svreg, hpc_mode, current_inc_step, kernel_count_norm_l1, train_svs):
+         upper_bounds, use_yuv, only_y_gamma, ssim_opt, sampling_percentage, update_kernel_list_iterations, overlap_of_batches, svreg, hpc_mode, current_inc_step, kernel_count_norm_l1, train_svs, train_trafo):
 
     if len(bit_depths) != 5:
         raise ValueError("Number of bit depths must be five!")
@@ -66,7 +66,7 @@ def main(image_path, results_path, iterations, iterations_inc, iterations_all, i
                 train_gammas=not disable_train_gammas, train_musx=not disable_train_musx, use_diff_center=use_diff_center, radial_as=radial_as, start_batches=batches,
                 batch_size=batch_size, use_determinant=use_determinant, normalize_pis=normalize_pis, quantization_mode=quantization_mode,
                 bit_depths=bit_depths, quantize_pis=quantize_pis, lower_bounds=lower_bounds, upper_bounds=upper_bounds,
-                use_yuv=use_yuv, only_y_gamma=only_y_gamma, ssim_opt=ssim_opt, precision=precision, add_kernel_slots=inc_steps*np.prod(kernels_per_dim), overlap_of_batches=overlap_of_batches, kernel_count_as_norm_l1=kernel_count_norm_l1, train_svs=train_svs, affines=affines)
+                use_yuv=use_yuv, only_y_gamma=only_y_gamma, ssim_opt=ssim_opt, precision=precision, add_kernel_slots=inc_steps*np.prod(kernels_per_dim), overlap_of_batches=overlap_of_batches, kernel_count_as_norm_l1=kernel_count_norm_l1, train_svs=train_svs, affines=affines, train_trafo=train_trafo)
 
 
     if not train_svs:
@@ -76,9 +76,10 @@ def main(image_path, results_path, iterations, iterations_inc, iterations_all, i
     optimizer2 = tf.train.AdamOptimizer(base_lr/lr_div)
     optimizer3 = tf.train.AdamOptimizer(base_lr*lr_mult)
     optimizer4 = tf.train.AdamOptimizer(base_lr * lr_mult_sv)
+    optimizer5 = tf.train.AdamOptimizer(base_lr)
 
     # optimizers have to be set before the restore
-    smoe.set_optimizer(optimizer1, optimizer2, optimizer3, optimizer4)
+    smoe.set_optimizer(optimizer1, optimizer2, optimizer3, optimizer4, optimizer5)
 
     base_lr_inc = base_lr  # *10
     optimizer_inc1 = tf.train.AdamOptimizer(base_lr_inc)
@@ -106,7 +107,7 @@ def main(image_path, results_path, iterations, iterations_inc, iterations_all, i
                                               dtype=bool)] * smoe.start_batches
 
     if iterations != 0:
-        smoe.train(iterations, val_iter=validation_iterations, pis_l1=l1reg, sv_l1_sub_l2=svreg,
+        smoe.train(iterations, val_iter=validation_iterations, ukl_iter=update_kernel_list_iterations, pis_l1=l1reg, sv_l1_sub_l2=svreg,
                    sampling_percentage=sampling_percentage,
                    callbacks=[loss_plotter.plot, image_plotter.plot, logger.log])
 
@@ -240,6 +241,8 @@ if __name__ == '__main__':
                         const=False, default=False, help="Normalization of l1-Regulariation on pis for Sparsifiacation (relevant for Kernel Adding Approach")
     parser.add_argument('-tvs', '--train_svs', type=str2bool, nargs='?',
                         const=False, default=False, help="Train additional Support Vectors")
+    parser.add_argument('-tt', '--train_trafo', type=str2bool, nargs='?',
+                        const=False, default=False, help="train affine/homography transformation in the pixel domain for each frame for video")
 
     args = parser.parse_args()
 
