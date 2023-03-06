@@ -12,6 +12,7 @@ from scipy.ndimage import gaussian_filter
 from ops.image_ops_impl import custom_ssim
 import cv2
 from scipy.cluster.vq import vq, kmeans, whiten
+from scipy.cluster.vq import kmeans2
 
 
 def sliding_window(image, Overlap, BatchSize):
@@ -37,7 +38,7 @@ class Smoe:
     def __init__(self, image, kernels_per_dim=None, train_pis=True, init_params=None, start_batches=1,
                  batch_size=None, train_gammas=True, train_musx=True, use_diff_center=False, radial_as=False, use_determinant=False,
                  normalize_pis=True, quantization_mode=0, bit_depths=None, quantize_pis=False, lower_bounds=None,
-                 upper_bounds=None, use_yuv=True, only_y_gamma=False, ssim_opt=False, precision=8, add_kernel_slots=0, iter_offset=0, margin=0.5, overlap_of_batches=0, kernel_count_as_norm_l1=False, train_svs=False, affines=None, train_trafo=False):
+                 upper_bounds=None, use_yuv=True, only_y_gamma=False, ssim_opt=False, precision=8, add_kernel_slots=0, iter_offset=0, margin=0.5, overlap_of_batches=0, kernel_count_as_norm_l1=False, train_svs=False, affines=None, train_trafo=False, num_params_model=6, train_inverse_cov=True, init_flag=1, only_rec_from_checkpoint=False, loss_mask=None):
         self.batch_shape = None
         self.use_yuv = use_yuv
         self.only_y_gamma = only_y_gamma
@@ -61,13 +62,15 @@ class Smoe:
         # tf vars
         self.pis_var = None
         self.musX_var = None
-        self.A_var = None
+        self.A_diagonal_var = None
+        self.A_corr_var = None
         self.gamma_e_var = None
         self.nu_e_var = None
 
         self.pis_best_var = None
         self.musX_best_var = None
-        self.A_best_var = None
+        self.A_diagonal_best_var = None
+        self.A_corr_best_var = None
         self.gamma_e_best_var = None
         self.nu_e_best_var = None
 
@@ -86,9 +89,29 @@ class Smoe:
         self.h21_var = None
         self.h22_var = None
         self.h23_var = None
-        self.stop_first_gradient_op = None
         self.h31_var = None
         self.h32_var = None
+        self.stop_first_gradient_op = None
+        self.num_params_model = num_params_model
+        self.loss_mask = loss_mask
+
+        self.h11_best_var = None
+        self.h12_best_var = None
+        self.h13_best_var = None
+        self.h21_best_var = None
+        self.h22_best_var = None
+        self.h23_best_var = None
+        self.h31_best_var = None
+        self.h32_best_var = None
+
+        self.qh11 = None
+        self.qh12 = None
+        self.qh13 = None
+        self.qh21 = None
+        self.qh22 = None
+        self.qh23 = None
+        self.qh31 = None
+        self.qh32 = None
 
         # tf inc ops
         self.stack_inc = None
@@ -191,9 +214,11 @@ class Smoe:
         self.upper_bounds = upper_bounds
         self.with_SV = train_svs
         self.train_trafo = train_trafo
+        self.train_inverse_cov = train_inverse_cov
 
         self.affines = affines
         self.transformed_domain = None
+        self.only_rec_from_checkpoint = only_rec_from_checkpoint
 
         # generate initializations
         self.start_batches = start_batches  # start_batches corresponds to desired batch numbers
@@ -253,23 +278,54 @@ class Smoe:
         # self.session = tf.Session()
 
         if self.affines is not None:
-            self.do_perspectiveTransform(affines, kernels_per_dim)
+            #kernels_per_dim[1] = np.round(kernels_per_dim[1] * (np.max(self.affines[:, 0, 2] / (self.image.shape[1] - 1)) - np.min(self.affines[:, 0, 2] / (self.image.shape[1] - 1)) + 1 ))
+            #kernels_per_dim[0] = np.round(kernels_per_dim[0] * (np.max(
+            #    self.affines[:, 1, 2] / (self.image.shape[0] - 1)) - np.min(
+            #    self.affines[:, 1, 2] / (self.image.shape[0] - 1)) + 1 ))
+
+            musx_init = self.musX_init.copy()
+            A_init = self.A_init.copy()
+            nu_e_init = self.nu_e_init.copy()
+            gamma_e_init = self.gamma_e_init.copy()
+            pis_init = self.pis_init.copy()
+            self.do_perspectiveTransform(affines, kernels_per_dim, init_flag)
         if self.affines is not None or self.dim_domain == 3 and self.train_trafo:
             self.initialize_frames_list()
             if self.affines is None:
                 self.transformed_domain = self.joint_domain.copy()
 
+        self.kernel_assignment_to_model = [np.concatenate([np.ones((self.A_init.shape[0],), dtype=bool), np.zeros((A_init.shape[0],), dtype=bool)], axis=0),
+                                           np.concatenate([np.zeros((self.A_init.shape[0],), dtype=bool), np.ones((A_init.shape[0],), dtype=bool)], axis=0)]
+
+        self.A_init = np.concatenate([self.A_init, A_init], axis=0)
+        self.nu_e_init = np.concatenate([self.nu_e_init, nu_e_init], axis=0)
+        self.gamma_e_init = np.concatenate([self.gamma_e_init, gamma_e_init], axis=0)
+        self.pis_init = np.concatenate([self.pis_init, np.zeros_like(pis_init)], axis=0) # do zeros_like to remove bg kernel first
+        self.musX_init[:, 2] = -5
+        self.musX_init = np.concatenate([self.musX_init, musx_init], axis=0)
+
+        self.start_pis = self.pis_init.size
+        # for add_kernel
+        self.kernel_count = self.pis_init.size
+
+        #self.dim_domain = 2
 
         self.init_model(self.nu_e_init, self.gamma_e_init, self.pis_init, self.musX_init, self.A_init, self.affines, add_kernel_slots)
-        self.initialize_kernel_list(add_kernel_slots)
-        #self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches
+        if True: #self.only_rec_from_checkpoint:
+            self.kernel_list_per_batch = [np.ones((self.start_pis,), dtype=bool)] * self.start_batches
+        else:
+            self.initialize_kernel_list(add_kernel_slots)
 
-        if self.affines is not None:
+        if self.affines is not None and not self.only_rec_from_checkpoint:
             w = self.get_weight_matrix_argmax()
+            w_e = self.get_weight_matrix()
             nue_init_transformed = []
             for ii in range(len(self.pis_init)):
                 nue_init_transformed.append(np.mean(self.image[w == ii], axis=0))
             nue_init_transformed_ = np.stack(nue_init_transformed)
+            if np.any(np.isnan(nue_init_transformed_)):
+                print('Some Kernels are not belonging to the argmax weighting matrix!')
+                nue_init_transformed_[np.isnan(nue_init_transformed_)] = 0.5
             self.session.run([self.re_assign_nue_op], feed_dict={self.nu_e: nue_init_transformed_})
 
     def init_model(self, nu_e_init, gamma_e_init, pis_init, musX_init, A_init, affines, add_kernel_slots=0):
@@ -491,55 +547,141 @@ class Smoe:
         self.target_op = self.joint_domain_batched_op[:, self.dim_domain:]
         self.domain_op = self.joint_domain_batched_op[:, :self.dim_domain]
 
+        self.loss_weights = tf.placeholder_with_default(tf.ones((tf.shape(self.target_op)[0], 1), dtype=tf.float32), shape=(None, 1))
+
         self.kernel_list = tf.placeholder(shape=(None,), dtype=tf.bool)
 
         if self.dim_domain == 3 and self.train_trafo or affines is not None:
             self.frames_list = tf.placeholder(shape=(None,), dtype=tf.bool)
 
             if affines is not None:
-                self.h11_var = tf.Variable(affines[:, 0, 0], trainable=self.train_trafo, dtype=tf.float32)
-                self.h12_var = tf.Variable(affines[:, 0, 1], trainable=self.train_trafo, dtype=tf.float32)
+                self.h11_var = tf.Variable(affines[:, 0, 0], trainable=self.train_trafo and self.num_params_model >= 4, dtype=tf.float32)
+                self.h12_var = tf.Variable(affines[:, 0, 1], trainable=self.train_trafo and self.num_params_model >= 4, dtype=tf.float32)
                 self.h13_var = tf.Variable(affines[:, 0, 2] / (self.image.shape[1] - 1), trainable=self.train_trafo,
                                            dtype=tf.float32)
 
-                self.h21_var = tf.Variable(affines[:, 1, 0], trainable=self.train_trafo, dtype=tf.float32)
-                self.h22_var = tf.Variable(affines[:, 1, 1], trainable=self.train_trafo, dtype=tf.float32)
+                self.h21_var = tf.Variable(affines[:, 1, 0], trainable=self.train_trafo and self.num_params_model >= 6, dtype=tf.float32)
+                self.h22_var = tf.Variable(affines[:, 1, 1], trainable=self.train_trafo and self.num_params_model >= 6, dtype=tf.float32)
                 self.h23_var = tf.Variable(affines[:, 1, 2] / (self.image.shape[0] - 1), trainable=self.train_trafo,
                                            dtype=tf.float32)
 
-                self.h31_var = tf.Variable(np.zeros_like(affines[:, 0, 0]), trainable=self.train_trafo,
-                                           dtype=tf.float32)
-                self.h32_var = tf.Variable(np.zeros_like(affines[:, 0, 0]), trainable=self.train_trafo,
-                                           dtype=tf.float32)
+                if affines.shape[1] == 3:
+                    self.h31_var = tf.Variable(affines[:, 2, 0], trainable=self.train_trafo and self.num_params_model == 8, dtype=tf.float32)
+                    self.h32_var = tf.Variable(affines[:, 2, 1], trainable=self.train_trafo and self.num_params_model == 8, dtype=tf.float32)
+                else:
+                    self.h31_var = tf.Variable(np.zeros_like(affines[:, 0, 0]), trainable=self.train_trafo and self.num_params_model == 8,
+                                               dtype=tf.float32)
+                    self.h32_var = tf.Variable(np.zeros_like(affines[:, 0, 0]), trainable=self.train_trafo and self.num_params_model == 8,
+                                               dtype=tf.float32)
             else:
-                self.h11_var = tf.Variable(np.ones((self.image.shape[2],)), trainable=self.train_trafo, dtype=tf.float32)
-                self.h12_var = tf.Variable(np.zeros((self.image.shape[2],)), trainable=self.train_trafo, dtype=tf.float32)
+                self.h11_var = tf.Variable(np.ones((self.image.shape[2],)), trainable=self.train_trafo and self.num_params_model >= 4, dtype=tf.float32)
+                self.h12_var = tf.Variable(np.zeros((self.image.shape[2],)), trainable=self.train_trafo and self.num_params_model >= 4, dtype=tf.float32)
                 self.h13_var = tf.Variable(np.zeros((self.image.shape[2],)), trainable=self.train_trafo, dtype=tf.float32)
 
-                self.h21_var = tf.Variable(np.zeros((self.image.shape[2],)), trainable=self.train_trafo, dtype=tf.float32)
-                self.h22_var = tf.Variable(np.ones((self.image.shape[2],)), trainable=self.train_trafo, dtype=tf.float32)
+                self.h21_var = tf.Variable(np.zeros((self.image.shape[2],)), trainable=self.train_trafo and self.num_params_model >= 6, dtype=tf.float32)
+                self.h22_var = tf.Variable(np.ones((self.image.shape[2],)), trainable=self.train_trafo and self.num_params_model >= 6, dtype=tf.float32)
                 self.h23_var = tf.Variable(np.zeros((self.image.shape[2],)), trainable=self.train_trafo, dtype=tf.float32)
 
-                self.h31_var = tf.Variable(np.zeros((self.image.shape[2],)), trainable=self.train_trafo, dtype=tf.float32)
-                self.h32_var = tf.Variable(np.zeros((self.image.shape[2],)), trainable=self.train_trafo, dtype=tf.float32)
+                self.h31_var = tf.Variable(np.zeros((self.image.shape[2],)), trainable=self.train_trafo and self.num_params_model == 8, dtype=tf.float32)
+                self.h32_var = tf.Variable(np.zeros((self.image.shape[2],)), trainable=self.train_trafo and self.num_params_model == 8, dtype=tf.float32)
 
-            h11_f = tf.tile(tf.boolean_mask(self.h11_var, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
-            h12_f = tf.tile(tf.boolean_mask(self.h12_var, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
-            h13_f = tf.tile(tf.boolean_mask(self.h13_var, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+            if self.quantization_mode > 1: # dont distinguish between qm2 and qm3
+                min_h11 = tf.reduce_min(self.h11_var)
+                max_h11 = tf.reduce_max(self.h11_var)
+                self.qh11 = tf.fake_quant_with_min_max_vars(self.h11_var - min_h11,
+                                                            min=0,
+                                                            max=max_h11 - min_h11,
+                                                            num_bits=8) + min_h11
 
-            h21_f = tf.tile(tf.boolean_mask(self.h21_var, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
-            h22_f = tf.tile(tf.boolean_mask(self.h22_var, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
-            h23_f = tf.tile(tf.boolean_mask(self.h23_var, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+                min_h12 = tf.reduce_min(self.h12_var)
+                max_h12 = tf.reduce_max(self.h12_var)
+                self.qh12 = tf.fake_quant_with_min_max_vars(self.h12_var - min_h12,
+                                                            min=0,
+                                                            max=max_h12 - min_h12,
+                                                            num_bits=8) + min_h12
+                min_h13 = tf.reduce_min(self.h13_var)
+                max_h13 = tf.reduce_max(self.h13_var)
+                self.qh13 = tf.fake_quant_with_min_max_vars(self.h13_var - min_h13,
+                                                            min=0,
+                                                            max=max_h13 - min_h13,
+                                                            num_bits=8) + min_h13
 
-            h31_f = tf.tile(tf.boolean_mask(self.h31_var, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
-            h32_f = tf.tile(tf.boolean_mask(self.h32_var, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+                min_h21 = tf.reduce_min(self.h21_var)
+                max_h21 = tf.reduce_max(self.h21_var)
+                self.qh21 = tf.fake_quant_with_min_max_vars(self.h21_var - min_h21,
+                                                            min=0,
+                                                            max=max_h21 - min_h21,
+                                                            num_bits=8) + min_h21
 
-            x_dash = h11_f * self.domain_op[:, 1] + h12_f * self.domain_op[:, 0] + h13_f
-            y_dash = h21_f * self.domain_op[:, 1] + h22_f * self.domain_op[:, 0] + h23_f
+                min_h22 = tf.reduce_min(self.h22_var)
+                max_h22 = tf.reduce_max(self.h22_var)
+                self.qh22 = tf.fake_quant_with_min_max_vars(self.h22_var - min_h22,
+                                                            min=0,
+                                                            max=max_h22 - min_h22,
+                                                            num_bits=8) + min_h22
+                min_h23 = tf.reduce_min(self.h23_var)
+                max_h23 = tf.reduce_max(self.h23_var)
+                self.qh23 = tf.fake_quant_with_min_max_vars(self.h23_var - min_h23,
+                                                            min=0,
+                                                            max=max_h23 - min_h23,
+                                                            num_bits=8) + min_h23
 
-            w_dash = h31_f * self.domain_op[:, 1] + h32_f * self.domain_op[:, 0] + 1
+                min_h31 = tf.reduce_min(self.h31_var)
+                max_h31 = tf.reduce_max(self.h31_var)
+                self.qh31 = tf.fake_quant_with_min_max_vars(self.h31_var - min_h31,
+                                                            min=0,
+                                                            max=max_h31 - min_h31,
+                                                            num_bits=8) + min_h31
 
-            self.domain_final = tf.stack([y_dash / w_dash, x_dash / w_dash, self.domain_op[:, -1]], axis=1)
+                min_h32 = tf.reduce_min(self.h32_var)
+                max_h32 = tf.reduce_max(self.h32_var)
+                self.qh32 = tf.fake_quant_with_min_max_vars(self.h32_var - min_h32,
+                                                            min=0,
+                                                            max=max_h32 - min_h32,
+                                                            num_bits=8) + min_h32
+            else:
+                self.qh11 = self.h11_var
+                self.qh12 = self.h12_var
+                self.qh13 = self.h13_var
+
+                self.qh21 = self.h21_var
+                self.qh22 = self.h22_var
+                self.qh23 = self.h23_var
+
+                self.qh31 = self.h31_var
+                self.qh32 = self.h32_var
+
+            h11_f = tf.tile(tf.boolean_mask(self.qh11, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+            h12_f = tf.tile(tf.boolean_mask(self.qh12, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+            h13_f = tf.tile(tf.boolean_mask(self.qh13, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+
+            h21_f = tf.tile(tf.boolean_mask(self.qh21, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+            h22_f = tf.tile(tf.boolean_mask(self.qh22, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+            h23_f = tf.tile(tf.boolean_mask(self.qh23, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+
+            h31_f = tf.tile(tf.boolean_mask(self.qh31, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+            h32_f = tf.tile(tf.boolean_mask(self.qh32, self.frames_list), [np.prod(self.batch_shape[:-2]), ])
+
+            w_dash = 1
+            if self.num_params_model == 2:
+                x_dash = self.domain_op[:, 1] + h13_f
+                y_dash = self.domain_op[:, 0] + h23_f
+
+            elif self.num_params_model == 4:
+                x_dash = h11_f * self.domain_op[:, 1] + h12_f * self.domain_op[:, 0] + h13_f
+                y_dash = -h12_f * self.domain_op[:, 1] + h11_f * self.domain_op[:, 0] + h23_f
+
+            elif self.num_params_model == 6 or self.num_params_model == 8:
+                x_dash = h11_f * self.domain_op[:, 1] + h12_f * self.domain_op[:, 0] + h13_f
+                y_dash = h21_f * self.domain_op[:, 1] + h22_f * self.domain_op[:, 0] + h23_f
+
+                if self.num_params_model == 8:
+                    w_dash = h31_f * self.domain_op[:, 1] + h32_f * self.domain_op[:, 0] + 1
+            else:
+                raise ValueError("Invalid motion parameter model!")
+
+            #self.domain_final = tf.stack([y_dash / w_dash, x_dash / w_dash, self.domain_op[:, -1]], axis=1)
+            self.domain_final = tf.stack([y_dash / w_dash, x_dash / w_dash, tf.ones_like(self.domain_op[:, -1]) * -5], axis=1)
         else:
             self.domain_final = self.domain_op
 
@@ -589,6 +731,9 @@ class Smoe:
         # combine A_diagonal and A_corr and use only triangular part
         A = tf.linalg.band_part(A_diagonal, 0, 0) \
             + tf.linalg.band_part(tf.linalg.set_diag(A_corr, np.zeros((num_of_all_kernels, self.dim_domain))), -1, 0)
+        if self.train_inverse_cov:
+            A += tf.transpose(tf.linalg.band_part(tf.linalg.set_diag(A_corr, np.zeros((num_of_all_kernels, self.dim_domain))), -1, 0), perm=(0, 2, 1))
+            #A = tf.square(A)
 
         bool_mask = tf.logical_and(self.kernel_list, pis_mask)
 
@@ -607,6 +752,8 @@ class Smoe:
         self.A = tf.boolean_mask(A, bool_mask)
         self.pis = tf.boolean_mask(self.qpis, bool_mask)
 
+        self.mask_model_0 = tf.boolean_mask(self.kernel_assignment_to_model[0], bool_mask)
+        self.mask_model_1 = tf.boolean_mask(self.kernel_assignment_to_model[1], bool_mask)
 
         musX = self.musX
         nu_e = self.nu_e
@@ -614,19 +761,48 @@ class Smoe:
         A = self.A
         pis = self.pis
 
+        musX_0 = tf.boolean_mask(musX, self.mask_model_0)
+        A_0 = tf.boolean_mask(A, self.mask_model_0)
+
+        musX_1 = tf.boolean_mask(musX, self.mask_model_1)
+        A_1 = tf.boolean_mask(A, self.mask_model_1)
+
         self.re_assign_nue_op = tf.assign(self.nu_e_var, nu_e)
+        self.re_assign_pis_op = tf.assign(self.pis_var, pis)
+        self.re_assign_musX_op = tf.assign(self.musX_var, musX)
 
         normalized_pis = self.pis_var / tf.reduce_sum(pis)
         self.re_normalize_pis_op = tf.assign(self.pis_var, normalized_pis)
 
-        musX = tf.expand_dims(musX, axis=1)
+        musX_0 = tf.expand_dims(musX_0, axis=1)
         # prepare domain
         domain_exp = self.domain_final
-        domain_exp = tf.tile(tf.expand_dims(domain_exp, axis=0), (tf.shape(musX)[0], 1, 1))
+        domain_exp = tf.tile(tf.expand_dims(domain_exp, axis=0), (tf.shape(musX_0)[0], 1, 1))
 
-        x_sub_mu = tf.expand_dims(domain_exp - musX, axis=-1)
+        x_sub_mu = tf.expand_dims(domain_exp - musX_0, axis=-1)
 
-        self.maha_dist = einsum('abli,alm,anm,abnj->ab', x_sub_mu, A, A, x_sub_mu)
+        musX_1 = tf.expand_dims(musX_1, axis=1)
+        # prepare domain
+        domain_exp_1 = self.domain_op
+        domain_exp_1 = tf.tile(tf.expand_dims(domain_exp_1, axis=0), (tf.shape(musX_1)[0], 1, 1))
+
+        x_sub_mu_1 = tf.expand_dims(domain_exp_1 - musX_1, axis=-1)
+
+        if self.train_inverse_cov:
+            #self.maha_dist = einsum('abli,alm,ablj->ab', x_sub_mu, A, x_sub_mu)
+            self.maha_dist = einsum('abli,alm,abmj->ab', x_sub_mu, A, x_sub_mu)
+            #self.maha_dist = einsum('abli,alm,abnj->ab', x_sub_mu, A, x_sub_mu) # Der hier ist falsch!!
+        else:
+            maha_dist_0 = einsum('abli,alm,anm,abnj->ab', x_sub_mu, A_0, A_0, x_sub_mu)
+            maha_dist_1 = einsum('abli,alm,anm,abnj->ab', x_sub_mu_1, A_1, A_1, x_sub_mu_1)
+            if False: # Background
+                maha_dist_1 = tf.ones_like(maha_dist_1) * 10**6
+                self.maha_dist = tf.concat([maha_dist_0, maha_dist_1], axis=0)
+            elif False: # Foreground
+                maha_dist_0 = tf.ones_like(maha_dist_0) * 10 ** 6
+                self.maha_dist = tf.concat([maha_dist_0, maha_dist_1], axis=0)
+            else: # Both
+                self.maha_dist = tf.concat([maha_dist_0, maha_dist_1], axis=0)
         self.maha_dist_ind = tf.boolean_mask(self.indices, tf.reduce_any(self.maha_dist < 800, axis=1))
         n_exp = tf.exp(-0.5 * self.maha_dist)
 
@@ -651,8 +827,12 @@ class Smoe:
         self.w_e_op = self.w_e_op * bool_mask_infl
 
         kernel_list_batch_op = tf.reduce_sum(bool_mask_infl, axis=1) > 0 # 10 ** -9
-        self.w_e_max_op = tf.reshape(tf.argmax(tf.boolean_mask(self.w_e_op, kernel_list_batch_op), axis=0),
-                                     self.batch_size)
+        if self.only_rec_from_checkpoint:
+            self.w_e_max_op = tf.zeros((self.batch_size), dtype=tf.int64)
+        else:
+            self.w_e_max_op = tf.reshape(tf.argmax(tf.boolean_mask(self.w_e_op, kernel_list_batch_op), axis=0),
+                                         self.batch_size)
+        #
         self.indices = tf.boolean_mask(self.indices, kernel_list_batch_op)
         self.w_e_out_op = tf.boolean_mask(self.w_e_op, kernel_list_batch_op)
         self.w_e_out_op = tf.reshape(self.w_e_out_op, (tf.shape(self.w_e_out_op)[0],) + self.batch_size)
@@ -684,12 +864,37 @@ class Smoe:
         self.A_corr_best_var = tf.Variable(self.qA_corr)
         self.gamma_e_best_var = tf.Variable(self.qgamma_e)
         self.nu_e_best_var = tf.Variable(self.qnu_e)
-        self.checkpoint_best_op = tf.group(tf.assign(self.pis_best_var, self.qpis),
-                                           tf.assign(self.musX_best_var, self.qmusX),
-                                           tf.assign(self.A_diagonal_best_var, self.qA_diagonal),
-                                           tf.assign(self.A_corr_best_var, self.qA_corr),
-                                           tf.assign(self.gamma_e_best_var, self.qgamma_e),
-                                           tf.assign(self.nu_e_best_var, self.qnu_e))
+        if self.dim_domain == 3 and self.train_trafo or affines is not None:
+            self.h11_best_var = tf.Variable(self.qh11)
+            self.h12_best_var = tf.Variable(self.qh12)
+            self.h13_best_var = tf.Variable(self.qh13)
+            self.h21_best_var = tf.Variable(self.qh21)
+            self.h22_best_var = tf.Variable(self.qh22)
+            self.h23_best_var = tf.Variable(self.qh23)
+            self.h31_best_var = tf.Variable(self.qh31)
+            self.h32_best_var = tf.Variable(self.qh32)
+            self.checkpoint_best_op = tf.group(tf.assign(self.pis_best_var, self.qpis),
+                                               tf.assign(self.musX_best_var, self.qmusX),
+                                               tf.assign(self.A_diagonal_best_var, self.qA_diagonal),
+                                               tf.assign(self.A_corr_best_var, self.qA_corr),
+                                               tf.assign(self.gamma_e_best_var, self.qgamma_e),
+                                               tf.assign(self.nu_e_best_var, self.qnu_e),
+                                               tf.assign(self.h11_best_var, self.qh11),
+                                               tf.assign(self.h12_best_var, self.qh12),
+                                               tf.assign(self.h13_best_var, self.qh13),
+                                               tf.assign(self.h21_best_var, self.qh21),
+                                               tf.assign(self.h22_best_var, self.qh22),
+                                               tf.assign(self.h23_best_var, self.qh23),
+                                               tf.assign(self.h31_best_var, self.qh31),
+                                               tf.assign(self.h32_best_var, self.qh32))
+        else:
+            self.checkpoint_best_op = tf.group(tf.assign(self.pis_best_var, self.qpis),
+                                               tf.assign(self.musX_best_var, self.qmusX),
+                                               tf.assign(self.A_diagonal_best_var, self.qA_diagonal),
+                                               tf.assign(self.A_corr_best_var, self.qA_corr),
+                                               tf.assign(self.gamma_e_best_var, self.qgamma_e),
+                                               tf.assign(self.nu_e_best_var, self.qnu_e))
+
 
         self.res = tf.quantization.fake_quant_with_min_max_args(self.res, min=0, max=1, num_bits=self.precision)
         #mse = tf.reduce_mean(tf.square(tf.round(self.res * 255) / 255 - self.target_op))
@@ -724,7 +929,7 @@ class Smoe:
         if not self.ssim_opt:
             # margin in pixel to determine epsilon
             epsilon = self.margin * 1 / (2 ** self.precision)
-            loss_pixel = tf.maximum(0., tf.square(tf.subtract(tf.abs(diff), epsilon)))
+            loss_pixel = tf.maximum(0., tf.square(tf.subtract(tf.abs(diff), epsilon))) * self.loss_weights
             if self.use_yuv:
                 loss_pixel = 6/8 * tf.reduce_mean(loss_pixel[:, 0]) + 1/8 * tf.reduce_sum(tf.reduce_mean(loss_pixel[:, 1::],
                                                                                                          axis=0))
@@ -941,7 +1146,8 @@ class Smoe:
                            for var in variables]
         self.zero_op = [grad.assign(tf.zeros_like(grad)) for grad in accum_gradients]
         gradients = tf.gradients(self.loss_op, variables)
-        self.accum_ops = [accum_gradients[i].assign_add(gv) for i, gv in enumerate(gradients)]
+        if not self.only_rec_from_checkpoint:
+            self.accum_ops = [accum_gradients[i].assign_add(gv) for i, gv in enumerate(gradients)]
 
         if grad_clip_value_abs is not None:
             accum_gradients = [tf.clip_by_value(g, -grad_clip_value_abs, grad_clip_value_abs) for g in accum_gradients]
@@ -1277,7 +1483,7 @@ class Smoe:
         self.kernel_count += self.num_inc_kernels
 
     def train(self, num_iter, val_iter=100, ukl_iter=None, optimizer1=None, optimizer2=None, optimizer3=None, grad_clip_value_abs=None, pis_l1=0,
-              u_l1=0, sv_l1_sub_l2=0, sampling_percentage=100, callbacks=(), with_inc=False, train_inc=False, train_orig=True):
+              u_l1=0, sv_l1_sub_l2=0, sampling_percentage=100, callbacks=(), with_inc=False, train_inc=False, train_orig=True, use_loss_mask=False):
         if ukl_iter == None:
             ukl_iter = val_iter
 
@@ -1300,7 +1506,7 @@ class Smoe:
 
         self.best_loss, self.best_mse, num_pi, num_sv = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, sv_l1_sub_l2=sv_l1_sub_l2, train=False,
                                                                          update_reconstruction=True, with_inc=with_inc,
-                                                                         train_inc=False)
+                                                                         train_inc=False, use_loss_mask=use_loss_mask)
 
 
         self.losses.append((self.iter, self.best_loss))
@@ -1320,7 +1526,7 @@ class Smoe:
 
                 loss_val, mse_val, num_pi, num_sv = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, sv_l1_sub_l2=sv_l1_sub_l2, train=train_orig,
                                                              update_reconstruction=False, sampling_percentage=sampling_percentage,
-                                                             with_inc=with_inc, train_inc=train_inc)
+                                                             with_inc=with_inc, train_inc=train_inc, use_loss_mask=use_loss_mask)
 
                 if update_kernel_list:
                     self.update_kernel_list(self.add_kernel_slots)
@@ -1336,7 +1542,7 @@ class Smoe:
                         self.rparams = rescaler(self, self.qparams)
                         qloss_val, qmse_val, _, _ = self.run_batched(pis_l1=pis_l1,
                                                                   u_l1=u_l1, sv_l1_sub_l2=sv_l1_sub_l2, train=False, update_reconstruction=True,
-                                                                  with_quantized_params=True, with_inc=with_inc, train_inc=False)
+                                                                  with_quantized_params=True, with_inc=with_inc, train_inc=False, use_loss_mask=use_loss_mask)
 
 
                     '''
@@ -1349,7 +1555,7 @@ class Smoe:
                                                       train_inc=False, thr_sv=1.0*10**6)
                     '''
                     loss_val, mse_val, num_pi, num_sv = self.run_batched(pis_l1=pis_l1, u_l1=u_l1, train=False,
-                                                                 update_reconstruction=True, with_inc=with_inc, train_inc=False, thr_sv=5*10**-3)
+                                                                 update_reconstruction=True, with_inc=with_inc, train_inc=False, thr_sv=5*10**-3, use_loss_mask=use_loss_mask)
 
                     # run batched with quant params
                     #print('PSNR_0 = {0:.2f},  PSNR_5 = {1:.2f},  PSNR_INF = {2:.2f}'.format(10*np.log10(255**2/mse_0), 10*np.log10(255**2/mse_val), 10*np.log10(255**2/mse_inf)))
@@ -1397,7 +1603,7 @@ class Smoe:
         print("best loss/mse: ", self.best_loss, "/", self.best_mse)
 
 
-    def run_batched(self, pis_l1=0, u_l1=0, sv_l1_sub_l2=0, train=True, update_reconstruction=False, with_quantized_params=False, sampling_percentage=100, with_inc=False, train_inc=False, thr_sv=None):
+    def run_batched(self, pis_l1=0, u_l1=0, sv_l1_sub_l2=0, train=True, update_reconstruction=False, with_quantized_params=False, sampling_percentage=100, with_inc=False, train_inc=False, thr_sv=None, use_loss_mask=False):
 
         self.valid = False
         if with_quantized_params:
@@ -1451,6 +1657,7 @@ class Smoe:
                 bool_mask_sv = bool_mask_sv.reshape(-1,)
 
 
+
             if train and self.dim_domain >= 4:
                 img_patch = img_patch[self.train_mask]
 
@@ -1463,18 +1670,25 @@ class Smoe:
 
             feed_dict = {self.joint_domain_batched_op: img_patch, self.pis_l1: pis_l1, self.u_l1: u_l1,
                          self.kernel_list: self.kernel_list_per_batch[ii], self.stack_inc: [1.] if with_inc else [0.], self.stack_orig: [1.]}
+
+            if use_loss_mask:
+                batch_loss_mask = self.loss_mask[coord[0]:self.batch_size_valued[0] + coord[0], coord[1]:self.batch_size_valued[1] + coord[1],
+                coord[2]:self.batch_size_valued[2] + coord[2]].reshape(-1, 1)
+                feed_dict.update({self.loss_weights: batch_loss_mask})
+
             if self.with_SV:
                 feed_dict.update({self.mask_of_sv_in_batch: bool_mask_sv, self.sv_l1_sub_l2: sv_l1_sub_l2})
                 if thr_sv is not None:
                     feed_dict.update({self.threshold_sv: thr_sv})
 
-            if train:
+            if train and not self.only_rec_from_checkpoint:
                 retrieve.append(self.accum_ops)
             if update_reconstruction:
                 retrieve += [self.res, self.w_e_max_op, self.res_sv]
                 if with_quantized_params:
                     feed_dict.update({self.A: self.rparams["A"], self.musX: self.rparams["musX"], self.nu_e: self.rparams["nu_e"], self.gamma_e: self.rparams["gamma_e"], self.pis: self.rparams["pis"]})
-
+                #das muss wieder weg!!!
+                #feed_dict.update({self.A: self.A_init, self.musX: self.musX_init, self.nu_e: self.nu_e_init, self.gamma_e: self.gamma_e_init, self.pis: self.pis_init})
             if train_inc:
                 retrieve.append(self.accum_inc_ops)
 
@@ -1496,7 +1710,10 @@ class Smoe:
                         w_e_batch = results[4][results[5]]
                     else:
                         rec_batch = results[5]
-                        w_e_batch = results[4][results[6]]
+                        if results[4].shape[0] == 0:
+                            w_e_batch = np.zeros(self.batch_size)
+                        else:
+                            w_e_batch = results[4][results[6]]
                         rec_sv_batch = results[7]
 
                 start_y = coord[0] + self.overlap
@@ -1581,6 +1798,15 @@ class Smoe:
                                                                          self.qgamma_e, self.qnu_e])
 
         out_dict = {'pis': pis, 'musX': musX, 'A_diagonal': A_diagonal, 'A_corr': A_corr, 'gamma_e': gamma_e, 'nu_e': nu_e}
+
+        if self.dim_domain == 3 and (self.affines is not None or self.train_trafo):
+            h11, h12, h13, h21, h22, h23, h31, h32 = self.session.run([self.qh11, self.qh12,
+                                                                       self.qh13, self.qh21,
+                                                                       self.qh22, self.qh23,
+                                                                       self.qh31, self.qh32])
+            out_dict.update({'h11': h11, 'h12': h12, 'h13': h13, 'h21': h21, 'h22': h22, 'h23': h23, 'h31': h31, 'h32': h32})
+
+
         return out_dict
 
     def get_gradients(self):
@@ -1601,12 +1827,25 @@ class Smoe:
             self.run_batched(train=False, update_reconstruction=True)
         return self.weight_matrix_argmax
 
+    def get_weight_matrix(self):
+        if not self.valid:
+            self.run_batched(train=False, update_reconstruction=True)
+        return self.weight_matrix
+
     def get_best_params(self):
         pis, musX, A_diagonal, A_corr, gamma_e, nu_e = self.session.run([self.pis_best_var, self.musX_best_var,
                                                                          self.A_diagonal_best_var, self.A_corr_best_var,
                                                                          self.gamma_e_best_var, self.nu_e_best_var])
+        out_dict = {'pis': pis, 'musX': musX, 'A_diagonal': A_diagonal, 'A_corr': A_corr, 'gamma_e': gamma_e,
+                    'nu_e': nu_e}
 
-        out_dict = {'pis': pis, 'musX': musX, 'A_diagonal': A_diagonal, 'A_corr': A_corr, 'gamma_e': gamma_e, 'nu_e': nu_e}
+        if self.dim_domain == 3 and (self.affines is not None or self.train_trafo):
+            h11, h12, h13, h21, h22, h23, h31, h32 = self.session.run([self.h11_best_var, self.h12_best_var,
+                                                                       self.h13_best_var, self.h21_best_var,
+                                                                       self.h22_best_var, self.h23_best_var,
+                                                                       self.h31_best_var, self.h32_best_var])
+            out_dict.update({'h11': h11, 'h12': h12, 'h13': h13, 'h21': h21, 'h22': h22, 'h23': h23, 'h31': h31, 'h32': h32})
+
         return out_dict
 
     def get_best_reconstruction(self):
@@ -1653,37 +1892,251 @@ class Smoe:
         self.batch_shape = self.get_batch_shape(self.start_batches, joint_domain.shape)
         self.joint_domain = joint_domain
 
-    def do_perspectiveTransform(self, affines, kernels_per_dim):
+    def do_perspectiveTransform(self, affines, kernels_per_dim, init_flag=1):
         transformed_domain = self.joint_domain.copy()
+        transformed_domain[..., 2] = -5
 
         for ii, affine in enumerate(affines):
-            transformed_domain[:, :, ii, 0] = affine[1, 0] * self.joint_domain[:, :, ii, 1] + affine[1, 1] * self.joint_domain[:, :, ii, 0] + affine[1, 2] / (self.image.shape[1] - 1)
-            transformed_domain[:, :, ii, 1] = affine[0, 0] * self.joint_domain[:, :, ii, 1] + affine[0, 1] * self.joint_domain[:, :, ii, 0] + affine[0, 2] / (self.image.shape[0] - 1)
+            if self.num_params_model == 2:
+                transformed_domain[:, :, ii, 0] = self.joint_domain[:, :, ii, 0] + affine[1, 2] / (self.image.shape[1] - 1)
+                transformed_domain[:, :, ii, 1] = self.joint_domain[:, :, ii, 1] + affine[0, 2] / (self.image.shape[0] - 1)
+            elif self.num_params_model == 4:
+                transformed_domain[:, :, ii, 1] = affine[0, 0] * self.joint_domain[:, :, ii, 1] + affine[0, 1] * self.joint_domain[:, :, ii, 0] + affine[0, 2] / (self.image.shape[0] - 1)
+                transformed_domain[:, :, ii, 0] = -affine[0, 1] * self.joint_domain[:, :, ii, 1] + affine[0, 0] * self.joint_domain[:, :, ii, 0] + affine[1, 2] / (self.image.shape[1] - 1)
+            else:
+                transformed_domain[:, :, ii, 0] = affine[1, 0] * self.joint_domain[:, :, ii, 1] + affine[1, 1] * self.joint_domain[:, :, ii, 0] + affine[1, 2] / (self.image.shape[1] - 1)
+                transformed_domain[:, :, ii, 1] = affine[0, 0] * self.joint_domain[:, :, ii, 1] + affine[0, 1] * self.joint_domain[:, :, ii, 0] + affine[0, 2] / (self.image.shape[0] - 1)
 
-        cnt = 0
-        musX_new = np.zeros_like(self.musX_init)
-        for xx in range(kernels_per_dim[1]):
-            for yy in range(kernels_per_dim[0]):
-                for zz in range(kernels_per_dim[2]):
-                    zz_start = np.int(np.round(self.image.shape[2]/kernels_per_dim[2])*zz)
-                    zz_end =  np.int(np.minimum(np.round(self.image.shape[2]/kernels_per_dim[2])*(zz+1), self.image.shape[2]))
-                    #print(zz_start, zz_end)
+            if self.num_params_model == 8 and affines.shape[1] == 3:
+                w_dash = affine[2, 0] * self.joint_domain[:, :, ii, 1] + affine[2, 1] * self.joint_domain[:, :, ii, 0] + 1
+                transformed_domain[:, :, ii, 0] /= w_dash
+                transformed_domain[:, :, ii, 1] /= w_dash
 
-                    xx_start = np.int(np.round(self.image.shape[1]/kernels_per_dim[1])*xx)
-                    xx_end =  np.int(np.minimum(np.round(self.image.shape[1]/kernels_per_dim[1])*(xx+1), self.image.shape[1]))
-                    #print(xx_start, xx_end)
+        if init_flag == 1: # do kinda affine trafo onto the kernel grid
+            cnt = 0
+            musX_new = np.zeros_like(self.musX_init)
+            for xx in range(kernels_per_dim[1]):
+                for yy in range(kernels_per_dim[0]):
+                    for zz in range(kernels_per_dim[2]):
+                        zz_start = np.int(np.floor(self.image.shape[2]/kernels_per_dim[2])*zz)
+                        zz_end = np.int(np.minimum(np.ceil(self.image.shape[2]/kernels_per_dim[2])*(zz+1), self.image.shape[2]))
+                        #print(zz_start, zz_end)
 
-                    yy_start = np.int(np.round(self.image.shape[0] / kernels_per_dim[0]) * yy)
-                    yy_end = np.int(np.minimum(np.round(self.image.shape[0] / kernels_per_dim[0]) * (yy + 1),
-                                        self.image.shape[0]))
-                    #print(yy_start, yy_end)
+                        xx_start = np.int(np.floor(self.image.shape[1]/kernels_per_dim[1])*xx)
+                        xx_end = np.int(np.minimum(np.ceil(self.image.shape[1]/kernels_per_dim[1])*(xx+1), self.image.shape[1]))
+                        #print(xx_start, xx_end)
 
-                    musX_new[cnt, :] = np.mean(transformed_domain[yy_start:yy_end, xx_start:xx_end, zz_start:zz_end, 0:3], axis=(0, 1, 2))
-                    cnt = cnt + 1
+                        yy_start = np.int(np.floor(self.image.shape[0] / kernels_per_dim[0]) * yy)
+                        yy_end = np.int(np.minimum(np.ceil(self.image.shape[0] / kernels_per_dim[0]) * (yy + 1),
+                                            self.image.shape[0]))
+                        #print(yy_start, yy_end)
 
-        self.musX_init = musX_new
-        self.nu_e_init = np.ones_like(self.nu_e_init) * .5
+                        musX_new[cnt, :] = np.mean(transformed_domain[yy_start:yy_end, xx_start:xx_end, zz_start:zz_end, 0:3], axis=(0, 1, 2))
+                        cnt = cnt + 1
+
+
+            self.nu_e_init = np.ones_like(self.nu_e_init) * .5
+
+            ''' # here: after affine trafo of kernel grid, try to find new time_means and corresponding bandwidth by using kmeans on xy-Plane
+            _, labels = kmeans2(transformed_domain[:, :, :, 0:2].reshape((-1, 2)), musX_new[:, 0:2], 1)
+            for ii in range(musX_new.shape[0]):
+                new_time_bandwidth = np.var(transformed_domain[:, :, :, 2].reshape((-1, 1))[labels == ii])
+                if not self.train_inverse_cov:
+                    new_time_bandwidth = np.sqrt(new_time_bandwidth)
+                if new_time_bandwidth > 0:
+                    self.A_init[ii, 2, 2] = 1/new_time_bandwidth
+                    musX_new[ii, 2] = np.mean(transformed_domain[:, :, :, 2].reshape((-1, 1))[labels == ii])
+            '''
+            self.musX_init = musX_new
+        elif init_flag > 1 and init_flag < 4: # define 2D regular grid on xy-plane and define depending on max kernels in time and variances number of kernels for each spatial coord.
+
+            flat_center = self.gen_domain(kernels_per_dim, 2)
+
+            '''
+            flat_center[:, 0] = (np.max(transformed_domain[..., 0]) - np.min(transformed_domain[..., 0])) * flat_center[
+                                                                                                            :,
+                                                                                                            0] + np.min(
+                transformed_domain[..., 0])
+            flat_center[:, 1] = (np.max(transformed_domain[..., 1]) - np.min(transformed_domain[..., 1])) * flat_center[
+                                                                                                            :,
+                                                                                                            1] + np.min(
+                transformed_domain[..., 1])
+            '''
+
+                            #### alternative:#####
+            min_y = np.sign(np.min(transformed_domain[..., 0])) * np.ceil(np.abs(np.min(transformed_domain[..., 0])))
+            min_x = np.sign(np.min(transformed_domain[..., 1])) * np.ceil(np.abs(np.min(transformed_domain[..., 1])))
+            max_y = np.ceil(np.max(transformed_domain[..., 0]))
+            max_x = np.ceil(np.max(transformed_domain[..., 1]))
+            # find recombinations
+            flat_center_s = []
+            for yy in range(int(min_y), int(max_y), 1):
+                for xx in range(int(min_x), int(max_x), 1):
+                    flat_center_s.append(flat_center +  np.array([yy, xx]))
+            flat_center = np.vstack(flat_center_s)
+
+            _, labels = kmeans2(transformed_domain[:, :, :, 0:2].reshape((-1, 2)), flat_center, 1)
+
+
+            variances_over_lum = []
+            for ii in np.unique(labels):
+                variances_over_lum.append(np.var(transformed_domain[..., 3].reshape((-1, 1))[labels == ii]))
+            varspace = np.linspace(np.min(variances_over_lum), np.max(variances_over_lum), kernels_per_dim[2])
+            num_kernel_per_flat_center = np.argmin(np.abs((np.expand_dims(variances_over_lum, 0) - np.expand_dims(varspace, -1) )), axis=0) + 1
+
+            musX_new = []
+            A_new = []
+            cnt = 0
+            for ii in np.unique(labels):
+                current_time_coords = transformed_domain[..., 2].reshape((-1, 1))[labels == ii]
+
+                # if true the upcoming kernel will be assigned to one frame anyway
+                if np.any(np.mean(current_time_coords, axis=0) == transformed_domain[0, 0, :, 2]) and len(np.unique(current_time_coords)) == 1:
+                    num_kernel_per_flat_center[cnt] = 1
+
+                if num_kernel_per_flat_center[cnt] == 1:
+                    if init_flag % 1 == 0:
+                        musX_new.append(np.hstack([flat_center[ii], np.mean(current_time_coords, axis=0)]))
+                        # the bandwidth depends on the variance (or span) of the labeled time-coords but is never more precise than kernels init'ed in regular as many as frames
+                        time_bandwidth = np.minimum(1 / np.sqrt(np.var(current_time_coords)), 2 * (self.image.shape[2] + 1))
+                    elif init_flag % 1 == .5:
+                        musX_new.append(np.hstack([flat_center[ii], .5]))
+                        time_bandwidth = 2 * (1 + 1) # bandwidth as precise as it is supposed at regular grid
+                    #A_new.append(np.diag([2 * (kernels_per_dim[0] + 1) / (np.max(transformed_domain[..., 0]) - np.min(transformed_domain[..., 0])), 2 * (kernels_per_dim[1] + 1) / (np.max(transformed_domain[..., 1]) - np.min(transformed_domain[..., 1])), time_bandwidth]) * [1, 1, 1])
+                    A_new.append(np.diag([2 * (kernels_per_dim[0] + 1),
+                                          2 * (kernels_per_dim[1] + 1), time_bandwidth]) * [1, 1, 1])
+                else:
+
+
+                    if np.floor(init_flag) == 2: #num_kernel_depends_on_variance:
+                        # time center regular depending on variance in luminance in corresponding samples
+                        time_means = np.linspace(np.min(current_time_coords),
+                                                 np.max(current_time_coords),
+                                                 num_kernel_per_flat_center[cnt])
+
+                        labels_for_time_bandwidth = np.argmin(
+                            np.abs(current_time_coords - time_means), axis=1)
+
+                        num_kernel = len(np.unique(labels_for_time_bandwidth))
+
+                        for jj in np.unique(labels_for_time_bandwidth):
+                            time_bandwidth = np.minimum(
+                                1 / (np.sqrt(np.var(current_time_coords[labels_for_time_bandwidth == jj])) + 10 ** -5),
+                                2 * (self.image.shape[2] + 1) * num_kernel)
+                            if np.isnan(time_bandwidth):
+                                continue
+                            musX_new.append(np.hstack([flat_center[ii], time_means[jj]]))
+
+                            #A_new.append(np.diag([2 * (kernels_per_dim[0] + 1) / (
+                            #        np.max(transformed_domain[..., 0]) - np.min(transformed_domain[..., 0])),
+                            #                      2 * (kernels_per_dim[1] + 1) / (
+                            #                              np.max(transformed_domain[..., 1]) - np.min(
+                            #                          transformed_domain[..., 1])), time_bandwidth]) * [1, 1, 1])
+                            A_new.append(np.diag([2 * (kernels_per_dim[0] + 1),
+                                                  2 * (kernels_per_dim[1] + 1), time_bandwidth]) * [1, 1, 1])
+                    elif np.floor(init_flag) == 3:
+                        # time center regular depending of existing time coords depending on maximal kernel in time domain:
+                        time_means = self.gen_domain([np.ceil(len(np.unique(current_time_coords)) * kernels_per_dim[2] / self.image.shape[2])], 1) * (np.max(current_time_coords) - np.min(current_time_coords)) + np.min(current_time_coords)
+                        for jj in range(len(time_means)):
+                            musX_new.append(np.hstack([flat_center[ii], time_means[jj]]))
+                            #A_new.append(np.diag([2 * (kernels_per_dim[0] + 1) / (
+                            #        np.max(transformed_domain[..., 0]) - np.min(transformed_domain[..., 0])),
+                            #                      2 * (kernels_per_dim[1] + 1) / (
+                            #                              np.max(transformed_domain[..., 1]) - np.min(
+                            #                          transformed_domain[..., 1])), 2 * (len(time_means) + 1)]) * [1, 1, 1])
+                            A_new.append(np.diag([2 * (kernels_per_dim[0] + 1),
+                                                  2 * (kernels_per_dim[1] + 1), 2 * (len(time_means) + 1)]) * [1, 1, 1])
+
+
+
+
+                cnt += 1
+            musX_new = np.stack(musX_new)
+            A_new = np.stack(A_new)
+            K = musX_new.shape[0]
+            print('Number of Kernels are ' + str(K))
+
+
+            ''' good working state
+            K = len(np.unique(labels))
+            musX_new = np.zeros((K, 3))
+            A_new = np.zeros((K, 3, 3))
+            cnt = 0
+            for ii in np.unique(labels):
+                musX_new[cnt] = np.hstack([flat_center[ii], np.mean(transformed_domain[..., 2].reshape((-1, 1))[labels == ii], axis=0)])
+                time_bandwidth = np.minimum(1/np.sqrt(np.var(transformed_domain[..., 2].reshape((-1, 1))[labels == ii])),2 * (self.image.shape[2] + 1) )
+                A_new[cnt] = np.diag([2 * (kernels_per_dim[0] + 1) / (np.max(transformed_domain[..., 0]) - np.min(transformed_domain[..., 0])), 2 * (kernels_per_dim[1] + 1) / (np.max(transformed_domain[..., 1]) - np.min(transformed_domain[..., 1])), time_bandwidth ])
+                cnt += 1
+            '''
+
+            self.musX_init = musX_new
+            self.A_init = A_new
+            self.start_pis = K
+            self.kernel_count = K
+            self.nu_e_init = np.ones((K, 3)) * .5
+            self.gamma_e_init = np.zeros((K, 3, 3))
+            self.pis_init = np.ones((K,))
+            #self.pis_init[0:K] = 1
+            #self.pis_init[K::] = 0
+            '''
+            K = flat_center.shape[0]
+            self.musX_init = np.hstack([flat_center, np.ones((K, 1)) * .5])
+            self.A_init = np.tile(np.diag([2 * (kernels_per_dim[0] + 1) / (np.max(transformed_domain[..., 0]) - np.min(transformed_domain[..., 0])), 2 * (kernels_per_dim[1] + 1) / (np.max(transformed_domain[..., 1]) - np.min(transformed_domain[..., 1])), 2 * (1+1)]), (K, 1, 1))
+            self.start_pis = K
+            self.kernel_count = K
+            self.nu_e_init = self.nu_e_init[0:K]
+            self.gamma_e_init = self.gamma_e_init[0:K]
+            self.pis_init = self.pis_init[0:K]
+            #self.pis_init[0:K] = 1
+            #self.pis_init[K::] = 0
+            '''
+        elif init_flag == 4 or init_flag == 5:
+            # find recombinations
+            flat_center_s = []
+            kernels_per_dim_2d = kernels_per_dim.copy()
+            kernels_per_dim_2d[2] = 1
+            if init_flag == 5:
+                for ii in range(2):
+                    kernels_per_dim_2d[ii] = int(np.ceil(kernels_per_dim_2d[ii] * 1.1*np.sqrt(kernels_per_dim[2])))
+            flat_center = self.gen_domain(kernels_per_dim_2d, 3)
+            if init_flag == 4:
+                min_y = np.sign(np.min(transformed_domain[..., 0])) * np.ceil(
+                    np.abs(np.min(transformed_domain[..., 0])))
+                min_x = np.sign(np.min(transformed_domain[..., 1])) * np.ceil(
+                    np.abs(np.min(transformed_domain[..., 1])))
+                max_y = np.ceil(np.max(transformed_domain[..., 0]))
+                max_x = np.ceil(np.max(transformed_domain[..., 1]))
+                for yy in range(int(min_y), int(max_y), 1):
+                    for xx in range(int(min_x), int(max_x), 1):
+                        flat_center_s.append(flat_center + np.array([yy, xx, 0]))
+                flat_center = np.vstack(flat_center_s)
+                _, labels = kmeans2(transformed_domain[:, :, :, 0:3].reshape((-1, 3)), flat_center, 1)
+                musX_new = flat_center[np.unique(labels)]
+            else:
+                min_y = np.sign(np.min(transformed_domain[..., 0])) * np.abs(np.min(transformed_domain[..., 0]))
+                min_x = np.sign(np.min(transformed_domain[..., 1])) * np.abs(np.min(transformed_domain[..., 1]))
+                max_y = np.max(transformed_domain[..., 0])
+                max_x = np.max(transformed_domain[..., 1])
+                flat_center[:, 0] = flat_center[:, 0] * (max_y - min_y) + min_y
+                flat_center[:, 1] = flat_center[:, 1] * (max_x - min_x) + min_x
+                _, labels = kmeans2(transformed_domain[:, :, :, 0:2].reshape((-1, 2)), flat_center[:, 0:2], 1)
+                musX_new = flat_center[np.unique(labels)]
+
+            K = musX_new.shape[0]
+            A_values = np.ones((3,))
+            for ii in range(2):
+                A_values[ii] = 2 * (kernels_per_dim_2d[ii] + 1)
+            A_prototype = np.diag(A_values)
+            A_new = np.tile(A_prototype, (K, 1, 1))
+            self.musX_init = musX_new
+            self.A_init = A_new
+            self.start_pis = K
+            self.kernel_count = K
+            self.nu_e_init = np.ones((K, 3)) * .5
+            self.gamma_e_init = np.zeros((K, 3, 3))
+            self.pis_init = np.ones((K,))
         self.transformed_domain = transformed_domain
+
 
 
     def get_iter(self):
@@ -1706,7 +2159,8 @@ class Smoe:
             np.fill_diagonal(A_prototype, 2 * (kernels_per_dim[0] + 1))
             number_of_kernel = kernels_per_dim[0] ** dim_of_domain
         self.A_init = np.tile(A_prototype, (number_of_kernel, 1, 1))
-        #self.A_init = self.A_init / 8
+        if self.train_inverse_cov:
+            self.A_init = self.A_init**2
 
     def generate_experts(self, with_means=True):
         assert self.musX_init is not None, "need musX to generate experts"
@@ -1802,9 +2256,16 @@ class Smoe:
             batch_center.append(np.mean(batch, axis=tuple(np.arange(self.dim_domain))))
         batch_center = np.stack(batch_center)
 
+        batch_center_1 = []
+        for (coord, batch) in sliding_window(self.joint_domain, self.overlap, self.batch_size_valued):
+            batch_center_1.append(np.mean(batch, axis=tuple(np.arange(self.dim_domain))))
+        batch_center_1 = np.stack(batch_center_1)
+
         maha_dists = []
         for k in range(batch_center.shape[0]):
             results = self.session.run([self.maha_dist], feed_dict={self.domain_final:  np.expand_dims(batch_center[k][:self.dim_domain], axis=0),
+                                                                    self.domain_op: np.expand_dims(
+                                                                        batch_center_1[k][:self.dim_domain], axis=0),
                                                                  self.kernel_list: np.ones((num_of_all_kernels,),
                                                                                            dtype=bool),
                                                                     self.stack_inc: [0.],
@@ -1829,11 +2290,30 @@ class Smoe:
             num_of_all_kernels = 2*num_of_all_kernels + add_kernel_slots
 
         if self.affines is not None or self.dim_domain == 3 and self.train_trafo:
-            h11, h12, h13, h21, h22, h23 = self.session.run([self.h11_var, self.h12_var, self.h13_var, self.h21_var, self.h22_var, self.h23_var])
+            if self.num_params_model == 2:
+                h13, h23 = self.session.run([self.qh13, self.qh23])
+                h11 = np.ones_like(h13)
+                h12 = np.zeros_like(h13)
+                h21 = np.zeros_like(h13)
+                h22 = np.ones_like(h13)
+            elif self.num_params_model == 4:
+                h11, h12, h13, h23 = self.session.run([self.qh11, self.qh12, self.qh13, self.qh23])
+                h22 = h11
+                h21 = -h12
+            elif self.num_params_model == 6:
+                h11, h12, h13, h21, h22, h23 = self.session.run([self.qh11, self.qh12, self.qh13, self.qh21, self.qh22, self.qh23])
+            elif self.num_params_model == 8:
+                h11, h12, h13, h21, h22, h23, h31, h32 = self.session.run([self.qh11, self.qh12, self.qh13, self.qh21, self.qh22, self.qh23, self.qh31, self.qh32])
             transformed_domain = self.joint_domain.copy()
+            transformed_domain[..., 2] = -5
             for ii in range(self.image.shape[2]):
-                transformed_domain[:, :, ii, 0] = h12[ii] * self.joint_domain[:, :, ii, 1] + h22[ii] * self.joint_domain[:, :, ii, 0] + h23[ii]
+                transformed_domain[:, :, ii, 0] = h21[ii] * self.joint_domain[:, :, ii, 1] + h22[ii] * self.joint_domain[:, :, ii, 0] + h23[ii]
                 transformed_domain[:, :, ii, 1] = h11[ii] * self.joint_domain[:, :, ii, 1] + h12[ii] * self.joint_domain[:, :, ii, 0] + h13[ii]
+                if self.num_params_model == 8:
+                    w_dash = h31[ii] * self.joint_domain[:, :, ii, 1] + h32[ii] * self.joint_domain[:, :, ii, 0] + 1
+                    transformed_domain[:, :, ii, 0] /= w_dash
+                    transformed_domain[:, :, ii, 1] /= w_dash
+
             joint_domain = transformed_domain
         else:
             joint_domain = self.joint_domain
@@ -1851,10 +2331,30 @@ class Smoe:
         maxs = maxs[:, 0:self.dim_domain]
         # get all corner points of (hyper-)cube and middle points of edges
         tt = np.concatenate((np.expand_dims(mins, axis=-1), np.expand_dims(maxs, axis=-1), np.expand_dims((mins + maxs)/2, axis=-1)), axis=-1)
+
+        ######## For non tranformed bla ##########
+        mins = []
+        maxs = []
+        for (coord, batch) in sliding_window(self.joint_domain, self.overlap, self.batch_size_valued):
+            mins.append(np.min(batch, axis=tuple(np.arange(self.dim_domain))))
+            maxs.append(np.max(batch, axis=tuple(np.arange(self.dim_domain))))
+        mins = np.stack(mins)
+        maxs = np.stack(maxs)
+
+        mins = mins[:, 0:self.dim_domain]
+        maxs = maxs[:, 0:self.dim_domain]
+        # get all corner points of (hyper-)cube and middle points of edges
+        tt_1 = np.concatenate((np.expand_dims(mins, axis=-1), np.expand_dims(maxs, axis=-1), np.expand_dims((mins + maxs)/2, axis=-1)), axis=-1)
+
         for k in range(mins.shape[0]):
             edges_batch = np.array(list(product(*tt[k, :, :])))
             edges_batch = np.concatenate((edges_batch, np.zeros((edges_batch.shape[0], self.image.shape[-1]))), axis=1)
+
+            edges_batch_1 = np.array(list(product(*tt_1[k, :, :])))
+            edges_batch_1 = np.concatenate((edges_batch_1, np.zeros((edges_batch_1.shape[0], self.image.shape[-1]))), axis=1)
             results = self.session.run([self.maha_dist_ind], feed_dict={self.domain_final: edges_batch[:,:self.dim_domain],
+                                                                        self.domain_op: edges_batch_1[:,
+                                                                                           :self.dim_domain],
                                                                   self.kernel_list: np.ones((num_of_all_kernels,),
                                                                                             dtype=bool),
                                                                     self.stack_inc: [1.],

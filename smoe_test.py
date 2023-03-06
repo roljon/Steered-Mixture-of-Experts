@@ -19,10 +19,13 @@ from utils import save_model, load_params, read_image
 def main(image_path, results_path, iterations, iterations_inc, iterations_all, inc_steps, threshold_rel, validation_iterations, kernels_per_dim, params_file, l1reg, base_lr,
          batches, batch_size, checkpoint_path, lr_div, lr_mult, lr_mult_sv, disable_train_pis, disable_train_gammas, disable_train_musx,
          use_diff_center, radial_as, use_determinant, normalize_pis, quantization_mode, bit_depths, quantize_pis, lower_bounds,
-         upper_bounds, use_yuv, only_y_gamma, ssim_opt, sampling_percentage, update_kernel_list_iterations, overlap_of_batches, svreg, hpc_mode, current_inc_step, kernel_count_norm_l1, train_svs, train_trafo):
+         upper_bounds, use_yuv, only_y_gamma, ssim_opt, sampling_percentage, update_kernel_list_iterations, overlap_of_batches, svreg, hpc_mode, current_inc_step, kernel_count_norm_l1, train_svs, train_trafo, num_params_model, train_inverse_cov, init_flag, only_rec_from_checkpoint, loss_mask_path):
 
     if len(bit_depths) != 5:
         raise ValueError("Number of bit depths must be five!")
+
+    if not (num_params_model == 2 or num_params_model == 4 or num_params_model == 6 or num_params_model == 8):
+        raise ValueError("num_params_model == {0:d} is not a valid motion parameter model".format(num_params_model))
 
     if ssim_opt:
         sampling_percentage = 100
@@ -50,6 +53,12 @@ def main(image_path, results_path, iterations, iterations_inc, iterations_all, i
             shutil.rmtree(results_path)
         os.mkdir(results_path)
 
+    use_loss_mask = False
+    loss_mask = None
+    if loss_mask_path is not None:
+        loss_mask = np.load(loss_mask_path)["loss_mask"]
+        use_loss_mask = True
+
     if len(kernels_per_dim) == 1:
         kernels_per_dim = [kernels_per_dim[0]] * len(orig.shape[:-1])
 
@@ -66,7 +75,7 @@ def main(image_path, results_path, iterations, iterations_inc, iterations_all, i
                 train_gammas=not disable_train_gammas, train_musx=not disable_train_musx, use_diff_center=use_diff_center, radial_as=radial_as, start_batches=batches,
                 batch_size=batch_size, use_determinant=use_determinant, normalize_pis=normalize_pis, quantization_mode=quantization_mode,
                 bit_depths=bit_depths, quantize_pis=quantize_pis, lower_bounds=lower_bounds, upper_bounds=upper_bounds,
-                use_yuv=use_yuv, only_y_gamma=only_y_gamma, ssim_opt=ssim_opt, precision=precision, add_kernel_slots=inc_steps*np.prod(kernels_per_dim), overlap_of_batches=overlap_of_batches, kernel_count_as_norm_l1=kernel_count_norm_l1, train_svs=train_svs, affines=affines, train_trafo=train_trafo)
+                use_yuv=use_yuv, only_y_gamma=only_y_gamma, ssim_opt=ssim_opt, precision=precision, add_kernel_slots=inc_steps*np.prod(kernels_per_dim), overlap_of_batches=overlap_of_batches, kernel_count_as_norm_l1=kernel_count_norm_l1, train_svs=train_svs, affines=affines, train_trafo=train_trafo, num_params_model=num_params_model, train_inverse_cov=train_inverse_cov, init_flag=init_flag, only_rec_from_checkpoint=only_rec_from_checkpoint, loss_mask=loss_mask)
 
 
     if not train_svs:
@@ -74,7 +83,7 @@ def main(image_path, results_path, iterations, iterations_inc, iterations_all, i
 
     optimizer1 = tf.train.AdamOptimizer(base_lr)
     optimizer2 = tf.train.AdamOptimizer(base_lr/lr_div)
-    optimizer3 = tf.train.AdamOptimizer(base_lr*lr_mult)
+    optimizer3 = tf.train.AdamOptimizer(base_lr*lr_mult*1)
     optimizer4 = tf.train.AdamOptimizer(base_lr * lr_mult_sv)
     optimizer5 = tf.train.AdamOptimizer(base_lr)
 
@@ -108,9 +117,94 @@ def main(image_path, results_path, iterations, iterations_inc, iterations_all, i
 
     if iterations != 0:
         smoe.train(iterations, val_iter=validation_iterations, ukl_iter=update_kernel_list_iterations, pis_l1=l1reg, sv_l1_sub_l2=svreg,
-                   sampling_percentage=sampling_percentage,
+                   sampling_percentage=sampling_percentage, use_loss_mask=use_loss_mask,
                    callbacks=[loss_plotter.plot, image_plotter.plot, logger.log])
 
+        if not only_rec_from_checkpoint: # and any other conditions actually
+            optimizer2 = tf.train.AdamOptimizer(base_lr / lr_div * 10)
+            smoe.set_optimizer(optimizer1, optimizer2, optimizer3, optimizer4, optimizer5)
+
+            further_iterations = 1000
+            for kk in range(kernels_per_dim[2]):
+                rec = smoe.get_reconstruction()
+                diff = np.average(np.power(255 * (smoe.image - rec), 2), axis=-1, weights=[6/8, 1/8, 1/8])
+
+                ## Code to sample direct randomly prop to diff-image
+                diff = diff**2
+                idx = np.random.choice(np.arange(0, np.prod(smoe.image.shape[0:-1])), p=diff.flatten() / np.sum(diff),
+                                       size=np.prod(kernels_per_dim[0:2]), replace=False)
+                idx_3d = np.unravel_index(idx, (smoe.image.shape[0:-1]), order='C')
+                musX_3d = np.stack([idx_3d[0] / (smoe.image.shape[0] - 1), idx_3d[1] / (smoe.image.shape[1] - 1),
+                                    idx_3d[2] / (smoe.image.shape[2] - 1)], axis=1)
+                '''
+                x_coord = np.linspace(0, smoe.image.shape[1] - 1, smoe.image.shape[1])
+                y_coord = np.linspace(0, smoe.image.shape[0] - 1, smoe.image.shape[0])
+                z_coord = np.linspace(0, smoe.image.shape[2] - 1, smoe.image.shape[2])
+                X, Y, Z = np.meshgrid(x_coord, y_coord, z_coord)
+                density_grid = np.ones((smoe.image.shape[0:-1]))
+                adaptation_map = np.ones((smoe.image.shape[0:-1])) * diff**2
+                bw = 2
+        
+                xj = []
+                yj = []
+                zj = []
+                for jj in range(np.prod(kernels_per_dim)):
+                    print(jj)
+                    density_grid_tmp = density_grid * adaptation_map
+                    idx = np.random.choice(np.arange(0, np.prod(smoe.image.shape[0:-1])),
+                                           p=density_grid_tmp.flatten() / (np.sum(density_grid_tmp)))
+                    idx = np.unravel_index(idx, (smoe.image.shape[0:-1]), order='C')
+                    density_grid = density_grid * (
+                            1 - np.exp(
+                        - ((Y - y_coord[idx[0]]) ** 2 + (X - x_coord[idx[1]]) ** 2 + (Z - z_coord[idx[2]]) ** 2) / (
+                                    bw ** 2))) ** 7
+                    xj.append(idx[1])
+                    yj.append(idx[0])
+                    zj.append(idx[2])
+                x_means = x_coord[np.stack(xj)] / (smoe.image.shape[1] - 1)
+                y_means = y_coord[np.stack(yj)] / (smoe.image.shape[0] - 1)
+                z_means = z_coord[np.stack(zj)] / (smoe.image.shape[2] - 1)
+                musX_3d = np.stack([y_means, x_means, z_means], axis=1)
+                '''
+                '''
+                A_3d = []
+                for ii in range(len(xj)):
+                    print(ii)
+                    dist = np.sqrt(((x_coord[xj[ii]] - x_coord[np.stack(xj)]) / smoe.image.shape[1]) ** 2 + (
+                            (y_coord[yj[ii]] - y_coord[np.stack(yj)]) / smoe.image.shape[0]) ** 2 + (
+                                           (z_coord[zj[ii]] - z_coord[np.stack(zj)]) / smoe.image.shape[2]) ** 2)
+                    dist = dist[dist > 0]
+                    a = np.ones((smoe.dim_domain,)) * 1.3 / (np.min(dist))
+                    A = np.diag(a)
+                    A_3d.append(A)
+                '''
+
+                old_pis, old_nues, old_musX = smoe.session.run([smoe.pis_var, smoe.nu_e_var, smoe.musX_var])
+
+                if kk == 0:
+                    num_2d_kernels = np.sum(old_pis != 0)
+                idx = np.zeros((smoe.start_pis,), dtype=np.bool)
+                idx[num_2d_kernels + kk * np.prod(kernels_per_dim[0:2]):num_2d_kernels + (
+                            kk + 1) * np.prod(kernels_per_dim[0:2])] = True
+                old_pis[idx] = 1
+                old_musX[idx] = musX_3d
+                smoe.session.run([smoe.re_assign_pis_op, smoe.re_assign_musX_op], feed_dict={smoe.pis: old_pis, smoe.musX: old_musX})
+                smoe.update_kernel_list()
+                smoe.valid = False
+                w = smoe.get_weight_matrix_argmax()
+                for ii in np.where(idx)[0]:
+                    old_nues[ii] = np.mean(smoe.image[w == ii], axis=0)
+                if np.any(np.isnan(old_nues)):
+                    old_nues[np.isnan(old_nues)] = 0.5
+                smoe.session.run([smoe.re_assign_nue_op], feed_dict={smoe.nu_e: old_nues})
+
+                if kk == kernels_per_dim[2] - 1:
+                    further_iterations = 5000
+
+                smoe.train(further_iterations, val_iter=validation_iterations, ukl_iter=update_kernel_list_iterations, pis_l1=l1reg,
+                           sv_l1_sub_l2=svreg,
+                           sampling_percentage=sampling_percentage,
+                           callbacks=[loss_plotter.plot, image_plotter.plot, logger.log])
     '''
     optimizer1 = tf.train.AdamOptimizer(base_lr*0)
     optimizer2 = tf.train.AdamOptimizer(base_lr / lr_div*0)
@@ -243,6 +337,19 @@ if __name__ == '__main__':
                         const=False, default=False, help="Train additional Support Vectors")
     parser.add_argument('-tt', '--train_trafo', type=str2bool, nargs='?',
                         const=False, default=False, help="train affine/homography transformation in the pixel domain for each frame for video")
+    parser.add_argument('-npm', '--num_params_model', type=int, default=6,
+                        help="kind of parameter model which can be chosen for global motion compensation (2-,4-,6-,8-Params)")
+    parser.add_argument('-tiv', '--train_inverse_cov', type=str2bool, nargs='?',
+                        const=False, default=False, help="train directly the inverse covariance matrix (which won't be necessarily a valid CovMat)")
+    parser.add_argument('-if', '--init_flag', type=float, default=1, help="Init Flag for Kernel Init in case of Video with Trafo: 1 - kinda affine trafo on regular kernel grid"
+                                                                                                                             ", 2 - along t-axis num of kernel depends on lum-var"
+                                                                                                                             ", 3 - along t-axis num of kernel depends on num of frames in this spatial location"
+                                                                                                                             ", {2,3}.0 - lonely kernels along t-axis are init'ed by var and mean of time coord"
+                                                                                                                             ", {2,3}.5 - lonely kernels along t-axis are init'ed by mean=.5 and regular bandwidth")
+    parser.add_argument('-orfc', '--only_rec_from_checkpoint', type=str2bool, nargs='?',
+                        const=False, default=False,
+                        help="flag to signalize that we are only interested in a reconstruction from a checkpoint. Makes things easier.")
+    parser.add_argument('-mask', '--loss_mask_path', type=str, default=None, help="input image")
 
     args = parser.parse_args()
 

@@ -33,6 +33,9 @@ def save_model(smoe, path, best=False, reduce=True, quantize=True):
           'use_yuv': smoe.use_yuv, 'only_y_gamma': smoe.only_y_gamma, 'ssim_opt': smoe.ssim_opt,
           'use_determinant': smoe.use_determinant, 'use_diff_center': smoe.use_diff_center}
 
+    if smoe.dim_domain == 3 and (smoe.train_trafo or smoe.affines is not None):
+        cp.update({'train_trafo': smoe.train_trafo, 'num_params_model': smoe.num_params_model})
+
     if quantize:
         qparams = smoe.qparams
         qparams.update({'dim_of_domain': smoe.dim_domain})
